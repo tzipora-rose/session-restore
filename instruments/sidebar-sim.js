@@ -8,6 +8,18 @@
 //   delete_group   the group goes; chats still in it become ungrouped
 // Like the tools, it refuses an archived chat, a routine's run and a chat with no entry. Like the
 // session the calls are meant for, it skips create_group when a group of that name exists.
+// It also keeps the receiving account's sidebar sections (epitaxyPrefs["dframe-code-sections"])
+// in step with its groups, as the app's web interface does (read in its build downloaded
+// 2026-10-08 02:44; the first three seen at 2026-10-08 07:57):
+//   - every group, empty or not, has one section of kind "manual" under its id and name; a new
+//     group's goes in before the built-in "sessions" section (Ungrouped); a deleted group's is
+//     dropped; each section's order is its place; a group section is saved with members [];
+//   - create_group, and a move_sessions that files a chat in a group, set Ungrouped's groupBy to
+//     "none": the app does this where the sidebar's grouping does not yet show custom groups and
+//     it does not lay sessions out in sections, which a feature switch of Anthropic's decides;
+//   - a move_sessions that files a chat in a group sets that group's section to collapsed false
+//     (read, not seen).
+// An account with no sections yet gets the built-in pinned, routines and sessions first.
 // Usage: node sidebar-sim.js <sandbox profile dir> <receiving key> <calls file> [--skip <n>]
 //   --skip <n>   leave call number n unmade (to see the next listing ask for it again)
 // It writes only into the sandbox: the settings file, and sim-empty-groups.json beside the
@@ -40,6 +52,48 @@ for (const g of empty) if (!scope.groups.some(x => x.id === g.id)) scope.groups.
 if (!Array.isArray(ep['starred-local-code-sessions'])) ep['starred-local-code-sessions'] = [];
 const pins = ep['starred-local-code-sessions'];
 
+// the sections as saved; a group section the file holds names a group the app has, empty or not
+const SECTIONS = 'dframe-code-sections';
+const entry = (ep[SECTIONS] || {})[key];
+const view = () => ({ sortBy: 'recency', ascending: false, show: { metadata: false, emptyGroups: false }, collapsed: false });
+const builtIn = (kind, order) => ({ id: kind, kind, name: '', order, ...view(), ...(kind === 'routines' ? { collapsed: true } : {}) });
+let sections = entry && Array.isArray(entry.sections) ? entry.sections : [builtIn('pinned', 0), builtIn('routines', 1), builtIn('sessions', 2)];
+for (const s of sections) if (s.kind === 'manual' && !scope.groups.some(x => x.id === s.id)) scope.groups.push({ id: s.id, name: s.name });
+
+// one section per section id; pinned and routines first and once; sessions last; order = place
+function place(list) {
+  const seen = new Set(), out = [];
+  let pinned = null, routines = null, ungrouped = null;
+  for (const s of list) {
+    if (seen.has(s.id)) continue;
+    seen.add(s.id);
+    if (s.kind === 'sessions') { ungrouped = ungrouped || (s.id === 'sessions' ? s : { ...s, id: 'sessions' }); continue; }
+    if (s.kind === 'pinned') { if (pinned) continue; pinned = s.id === 'pinned' ? s : { ...s, id: 'pinned' }; out.push(pinned); continue; }
+    if (s.kind === 'routines') { if (routines) continue; routines = s.id === 'routines' ? s : { ...s, id: 'routines' }; out.push(routines); continue; }
+    out.push(s);
+  }
+  return [...out, ungrouped || builtIn('sessions', out.length)].map((s, i) => s.order === i ? s : { ...s, order: i });
+}
+// the app's reconciliation of the sections with the groups it holds
+function reconcile() {
+  const list = [...sections];
+  if (!list.some(s => s.kind === 'pinned')) list.unshift(builtIn('pinned', 0));
+  if (!list.some(s => s.kind === 'routines')) { const at = list.findIndex(s => s.kind === 'pinned') + 1; list.splice(at, 0, builtIn('routines', at)); }
+  const had = new Set(list.filter(s => s.kind === 'manual').map(s => s.id));
+  const kept = [];
+  for (const s of list) {
+    if (s.kind !== 'manual') { kept.push(s); continue; }
+    const g = scope.groups.find(x => x.id === s.id);
+    if (g) kept.push(s.name === g.name ? s : { ...s, name: g.name });
+  }
+  const fresh = scope.groups.filter(g => !had.has(g.id)).map(g => ({ id: g.id, kind: 'manual', name: g.name, order: 0, members: [], ...view() }));
+  const at = kept.findIndex(s => s.kind === 'sessions');
+  kept.splice(at < 0 ? kept.length : at, 0, ...fresh);
+  sections = place(kept);
+}
+const setSection = (id, change) => { sections = sections.map(s => s.id === id ? change(s) : s); };
+const showCustomGroups = () => setSection('sessions', s => { if (s.groupBy === 'none') return s; const { groupBy, ...rest } = s; return { ...rest, groupBy: 'none' }; });
+
 const byName = name => { const g = scope.groups.filter(x => x.name === name); if (g.length !== 1) throw new Error(`${g.length} groups are named ${JSON.stringify(name)}`); return g[0]; };
 const leave = id => {
   const k = 'code:' + id, old = scope.assignments[k];
@@ -57,22 +111,30 @@ for (const call of file.calls) {
   if (call.tool === 'create_group') {
     if (scope.groups.some(x => x.name === a.name)) { console.log(`${n}. create_group ${JSON.stringify(a.name)}: skipped, a group of that name exists`); continue; }
     scope.groups.push({ id: 'cg-sim-' + crypto.randomUUID(), name: a.name });
+    reconcile();
+    showCustomGroups();
   } else if (call.tool === 'move_sessions') {
     const gid = a.group === null ? null : byName(a.group).id;
+    let moved = 0;
     for (const id of a.session_ids) {
       usable(id);
+      const changed = (scope.assignments['code:' + id] || null) !== gid;
       leave(id);
       if (gid !== null) {
         scope.assignments['code:' + id] = gid;
         (scope.order[gid] = scope.order[gid] || []).push('code:' + id);
-        const p = pins.indexOf(id); if (p !== -1) pins.splice(p, 1);
+        const p = pins.indexOf(id); if (p !== -1) { pins.splice(p, 1); moved++; continue; }
       }
+      if (changed) moved++;
     }
+    reconcile();
+    if (gid !== null && moved > 0) { setSection(gid, s => s.collapsed === false ? s : { ...s, collapsed: false }); showCustomGroups(); }
   } else if (call.tool === 'delete_group') {
     const g = byName(a.group);
     for (const k of Object.keys(scope.assignments)) if (scope.assignments[k] === g.id) delete scope.assignments[k];
     delete scope.order[g.id];
     scope.groups = scope.groups.filter(x => x.id !== g.id);
+    reconcile();
   } else if (call.tool === 'set_pinned') {
     usable(a.session_id);
     const p = pins.indexOf(a.session_id);
@@ -87,6 +149,11 @@ empty = scope.groups.filter(g => !used.has(g.id));
 const saved = { groups: scope.groups.filter(g => used.has(g.id)), assignments: scope.assignments, order: {} };
 for (const g of saved.groups) if ((scope.order[g.id] || []).length) saved.order[g.id] = scope.order[g.id];
 if (saved.groups.length) ep['dframe-group-scopes'][key] = saved; else delete ep['dframe-group-scopes'][key];
+if (made > 0) {
+  if (!ep[SECTIONS]) ep[SECTIONS] = {};
+  const savedSections = sections.map(s => s.kind === 'manual' ? { ...s, members: [] } : s);
+  ep[SECTIONS][key] = entry ? { ...entry, sections: savedSections } : { sections: savedSections };
+}
 fs.writeFileSync(prefsPath, JSON.stringify(prefs, null, 2));
 fs.writeFileSync(emptyPath, JSON.stringify(empty));
-console.log(`made ${made} of ${file.calls.length} call(s); groups with chats now: ${saved.groups.map(g => `"${g.name}" (${Object.values(saved.assignments).filter(v => v === g.id).length})`).join(', ') || 'none'}; ${empty.length} empty; pin list ${pins.length}`);
+console.log(`made ${made} of ${file.calls.length} call(s); groups with chats now: ${saved.groups.map(g => `"${g.name}" (${Object.values(saved.assignments).filter(v => v === g.id).length})`).join(', ') || 'none'}; ${empty.length} empty; pin list ${pins.length}; sections ${sections.map(s => s.kind === 'manual' ? JSON.stringify(s.name) : s.kind).join(', ')}`);

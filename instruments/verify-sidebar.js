@@ -1,8 +1,15 @@
 // Checks, after the calls of session-restore.ps1 -Sidebar were made, that the receiving
-// account's groups and pins in the app's settings file are what the plan aims at, and that
-// nothing else in that file moved. Shares no code with the script.
+// account's groups and pins in the app's settings file are what the plan aims at, that its
+// sidebar sections are in step with its groups, and that nothing else in that file moved. Shares
+// no code with the script.
 // Usage: node verify-sidebar.js <sandbox profile dir> <plan file> <desired|before> <settings file as it was before any call>
 // In a sandbox the calls are made by sidebar-sim.js; on the real machine by a Claude session.
+// The app keeps one section of kind "manual" per group in epitaxyPrefs["dframe-code-sections"],
+// and changes that key itself when the calls create, fill or delete groups (read in its web
+// interface, seen 2026-10-08), so the receiving account's entry of it is checked on its own:
+// each group that holds a chat has one such section under its id and name; any other was there
+// before the calls, unchanged, for a group that held no chat then; and the built-in sections
+// pinned, routines and sessions are there, as before apart from their order and groupBy.
 const fs = require('fs');
 const path = require('path');
 const [profile, planPath, aim, referencePath] = process.argv.slice(2);
@@ -10,6 +17,9 @@ if (!referencePath || !['desired', 'before'].includes(aim)) { console.error('usa
 let fails = 0;
 const check = (ok, msg) => { console.log((ok ? '  ok   ' : '  FAIL ') + msg); if (!ok) fails++; };
 const sameSet = (a, b) => a.length === b.length && new Set(a).size === a.length && a.every(x => b.includes(x));
+// a value as JSON with every object's keys sorted, so two values compare by content alone
+const canon = v => JSON.stringify(v, (k, x) => x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map(n => [n, x[n]])) : x);
+const without = (o, ...names) => { const c = { ...o }; for (const n of names) delete c[n]; return c; };
 
 const pk = path.join(profile, 'AppData', 'Local', 'Packages');
 const hits = fs.readdirSync(pk).filter(n => n.startsWith('Claude_') && fs.existsSync(path.join(pk, n, 'LocalCache', 'Roaming', 'Claude', 'claude-code-sessions')));
@@ -45,8 +55,50 @@ if (target.pinned !== null) {
 } else console.log('  --   pins are not planned');
 check(JSON.stringify(pins.filter(id => !mine.has(id))) === JSON.stringify(refPins.filter(id => !mine.has(id))), 'every other account\'s pins are as they were, in the same order');
 
+// the account's sidebar sections, in step with its groups; "saved" groups are those the
+// settings file lists, which are the groups holding a chat
+const SECTIONS = 'dframe-code-sections';
+const secNow = (ep[SECTIONS] || {})[key], secRef = (rep[SECTIONS] || {})[key];
+const savedNow = scope.groups;
+const savedRef = new Set((((rep['dframe-group-scopes'] || {})[key]) || { groups: [] }).groups.map(g => g.id));
+if (secNow === undefined || !Array.isArray(secNow.sections)) {
+  check(secNow === undefined && secRef === undefined && savedNow.length === 0, 'the account has no sidebar sections saved' + (secNow !== undefined ? ', and its entry holds no list of them' : '') + (secRef !== undefined ? ', though it had before the calls' : '') + (savedNow.length ? `, though ${savedNow.length} of its groups hold chats` : ''));
+} else {
+  const S = secNow.sections, refS = secRef && Array.isArray(secRef.sections) ? secRef.sections : [];
+  check(new Set(S.map(s => s.id)).size === S.length, 'no section is there twice');
+  const wrong = [];
+  for (const g of savedNow) {
+    const h = S.filter(s => s.kind === 'manual' && s.id === g.id);
+    if (h.length !== 1) wrong.push(`"${g.name}" has ${h.length} section(s)`);
+    else if (h[0].name !== g.name) wrong.push(`"${g.name}"'s section is named ${JSON.stringify(h[0].name)}`);
+  }
+  check(wrong.length === 0, `each group that holds a chat has one section under its id and name: ${savedNow.map(g => `"${g.name}"`).join(', ') || 'none'}`);
+  if (wrong.length) console.log('       ' + wrong.join('; '));
+  const others = S.filter(s => s.kind === 'manual' && !savedNow.some(g => g.id === s.id));
+  const odd = others.filter(s => { const r = refS.find(x => x.kind === 'manual' && x.id === s.id); return !r || savedRef.has(s.id) || canon(without(r, 'order')) !== canon(without(s, 'order')); });
+  check(odd.length === 0, `any other group section was there before the calls, unchanged, for a group that held no chat then (${others.length})`);
+  if (odd.length) console.log('       ' + odd.map(s => `${JSON.stringify(s.name)} (${s.id})`).join(', '));
+  const kinds = ['pinned', 'routines', 'sessions'], wrongB = [];
+  for (const k of kinds) {
+    const h = S.filter(s => s.kind === k);
+    if (h.length !== 1 || h[0].id !== k) { wrongB.push(`${h.length} section(s) of kind ${k}${h.length === 1 ? ` with id ${JSON.stringify(h[0].id)}` : ''}`); continue; }
+    const r = refS.find(s => s.kind === k);
+    if (r && canon(without(r, 'order', 'groupBy')) !== canon(without(h[0], 'order', 'groupBy'))) wrongB.push(`${k} differs from before`);
+  }
+  const strangers = S.filter(s => !kinds.includes(s.kind) && s.kind !== 'manual');
+  if (strangers.length) wrongB.push(`${strangers.length} section(s) of another kind`);
+  check(wrongB.length === 0, 'the built-in sections pinned, routines and sessions are there' + (secRef ? ', as before apart from order and groupBy' : ''));
+  if (wrongB.length) console.log('       ' + wrongB.join('; '));
+  if (secRef) check(canon(without(secNow, 'sections')) === canon(without(secRef, 'sections')), 'the account\'s entry of sections is otherwise as before');
+}
+
 // nothing else in the settings file moved
-const strip = p => { const c = JSON.parse(JSON.stringify(p)); const e = c.preferences.epitaxyPrefs; if (e['dframe-group-scopes']) delete e['dframe-group-scopes'][key]; if (e['dframe-group-scopes'] && Object.keys(e['dframe-group-scopes']).length === 0) delete e['dframe-group-scopes']; delete e['starred-local-code-sessions']; return JSON.stringify(c); };
+const strip = p => {
+  const c = JSON.parse(JSON.stringify(p)), e = c.preferences.epitaxyPrefs;
+  for (const k of ['dframe-group-scopes', SECTIONS]) if (e[k]) { delete e[k][key]; if (Object.keys(e[k]).length === 0) delete e[k]; }
+  delete e['starred-local-code-sessions'];
+  return JSON.stringify(c);
+};
 check(strip(now) === strip(ref), 'nothing else in the settings file differs from before the calls');
 console.log(fails === 0 ? 'SIDEBAR CHECK CLEAN' : `SIDEBAR CHECK FAILED: ${fails}`);
 process.exit(fails === 0 ? 0 : 1);

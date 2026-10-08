@@ -64,9 +64,10 @@ sandbox's entries can also be edited before a run to stage a case the real data 
 fingerprints again afterwards, the way `new-sandbox.ps1` takes them, so `-Compare` and
 `verify-entries.js` measure against the staged state.
 
-The stand-in is only as true as what was seen of the app. Its header says what it models and
-when that was seen. After an app update that changes the sidebar tools, try the tools on the
-real sidebar again, with one chat and a throwaway group, before trusting it.
+The stand-in is only as true as what was seen of the app. Its header says what it models, when
+that was seen, and what was read in the app's code instead. After an app update that changes
+the sidebar tools, try the tools on the real sidebar again, with one chat and a throwaway group,
+before trusting it.
 
 ## The tools
 
@@ -96,11 +97,13 @@ real sidebar again, with one chat and a throwaway group, before trusting it.
   created after the file was saved as they are.
 - `sidebar-sim.js` — stands in for the app's sidebar tools in a sandbox: makes the calls
   `-Sidebar` listed in the sandbox's copy of the app's settings file, the way the app was seen
-  to make them, and refuses what the tools refuse. `--skip <n>` leaves one call unmade. It
-  refuses to run on anything but a sandbox.
+  to make them, refuses what the tools refuse, and changes the receiving account's sidebar
+  sections the way the app does (below). `--skip <n>` leaves one call unmade. It refuses to run
+  on anything but a sandbox.
 - `verify-sidebar.js` — checks, after the calls, that the receiving account's groups and pins in
   the settings file are what the plan aims at (`desired` or `before`), that every other
-  account's pins are as they were, and that nothing else in the file changed.
+  account's pins are as they were, that the account's sidebar sections are in step with its
+  groups (below), and that nothing else in the file changed.
 - `verify-list.js` — checks the list of an account's groups and pinned chats the script saves for
   a switch (`sidebar-list-<account>.json` in the profile's `.session-restore\`), or an export
   (`--file <file>`): it names the account and its org, holds the groups of the app's settings
@@ -178,11 +181,21 @@ real sidebar again, with one chat and a throwaway group, before trusting it.
   (`rmdir` removes a link, not its target) and refuses if any other link remains.
 - **The storage copies are taken while the app may be writing.** If the script reports that the
   browser storage was read while it was being written, rebuild the sandbox.
-- **On the real app, `verify-sidebar.js`'s last check fails after real calls**, because the app
-  also adds a section for each group it creates to `epitaxyPrefs["dframe-code-sections"]` of the
-  receiving account, and sets that account's Ungrouped section to `groupBy` "none"; the stand-in
-  writes neither, and the check sets neither aside. Seen 2026-10-08, with the first real calls
-  on a second account. Read which keys differ before calling such a failure a wrong call.
+- **The app changes the receiving account's sidebar sections itself**, in
+  `epitaxyPrefs["dframe-code-sections"]`: every group, empty or not, has one section of kind
+  `manual` under its id and name, saved with no members; `create_group` adds one before
+  Ungrouped, and `delete_group` drops it; where the sidebar's grouping does not yet show custom
+  groups and it does not lay sessions out in sections (a feature switch of Anthropic's),
+  `create_group` and a move into a group set Ungrouped's `groupBy` to "none"; and a move into a
+  group expands that group's section (read, not yet seen). So `verify-sidebar.js` leaves that
+  account's entry of the key out of its whole-file check and checks it on its own: one section
+  for each group that holds a chat, under its id and name; any other group section there before
+  the calls, unchanged, for a group that held no chat then; the built-in sections as before
+  apart from their order and `groupBy`. Read in the web interface downloaded 2026-10-08 02:44,
+  and seen on the real app at 07:57 that day; the stand-in makes that change byte for byte. The
+  web interface is rebuilt often: after a change to the sidebar, read its function that
+  reconciles the sections with the groups again (`webui-cache\scan-cache.js`, needle
+  `kind:"manual"`) before trusting either.
 - **A file a Claude session's shell creates under `AppData` is stored in the app's package
   folder**, because the desktop app is a packaged app; a console outside the app does not see it
   at the path asked for. So anything both a console run and a session's run must find is kept
@@ -198,18 +211,21 @@ real sidebar again, with one chat and a throwaway group, before trusting it.
   FOF_ALLOWUNDO and FOF_WANTNUKEWARNING set, no dialog and no Recycle Bin record. Check every path,
   and every file inside a folder, before sending anything to the Recycle Bin, as
   `delete-chat.ps1` does. The shell's Restore verb puts an item back but leaves its `$I` record in
-  the Recycle Bin folder, so a full run of `test-delete-chat.ps1` leaves 11 such records until the
-  bin is emptied; use `-PlanOnly` unless the moving code itself changed.
+  the Recycle Bin folder, where the shell no longer lists it, so emptying the bin does not remove
+  it: a full run of `test-delete-chat.ps1` leaves 11 such records, which only deleting those
+  files removes; use `-PlanOnly` unless the moving code itself changed.
 - **Windows PowerShell 5.1 has built-in aliases a script's own function cannot override**, such
   as `diff` for `Compare-Object`: a function named `Diff` never runs, and a check built on it
   passes without comparing anything. Give helper functions Verb-Noun names.
 - **A script's variables and its parameters share one set of names, whatever their letter case.**
   A parameter `-Sidebar` and a variable `$sidebar` are one variable, and assigning an object to
   it fails on the parameter's type. Met 2026-10-08.
-- **Windows PowerShell 5.1 cannot wrap a generic list of objects in `@(...)`**: it throws
-  "Argument types do not match". Turn the list into an array with `.ToArray()` first. And an
-  empty array returned from `$(...)` becomes nothing: assign it to a variable to keep it a list.
-  Both met 2026-10-08.
+- **`@(...)` around a `System.Collections.Generic.List[object]` made with `New-Object` throws
+  "Argument types do not match"**, in Windows PowerShell 5.1 and PowerShell 7.6 alike; the same
+  list made with `::new()`, a `List[string]` or `List[int]` made with `New-Object`, and an
+  `ArrayList` are fine. Make such a list with `::new()`, or turn it into an array with
+  `.ToArray()` first. And an empty array returned from `$(...)` becomes nothing: assign it to a
+  variable to keep it a list. Both met 2026-10-08; the first checked in both shells that day.
 - **Git Bash converts doubled backslashes in arguments to native programs.** To search a transcript
   for a Windows path as JSON stores it (two backslashes), pass four; test any such search with a
   string known to be present first.
