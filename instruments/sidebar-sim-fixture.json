@@ -1,0 +1,122 @@
+{
+  "seen": "the receiving account's entry of epitaxyPrefs[\"dframe-code-sections\"] before and after the calls create_group \"group 1\", move_sessions into it, create_group \"group 2\", move_sessions into it, as the Claude desktop app 2.26454.2.0 wrote it on 2026-10-08; group ids and names replaced by placeholders",
+  "before": {
+    "sections": [
+      {
+        "id": "pinned",
+        "kind": "pinned",
+        "name": "",
+        "order": 0,
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": false
+      },
+      {
+        "id": "routines",
+        "kind": "routines",
+        "name": "",
+        "order": 1,
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": true
+      },
+      {
+        "id": "sessions",
+        "kind": "sessions",
+        "name": "",
+        "order": 2,
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": false
+      }
+    ],
+    "migratedFrom": 1,
+    "prefsSeeded": true
+  },
+  "after": {
+    "sections": [
+      {
+        "id": "pinned",
+        "kind": "pinned",
+        "name": "",
+        "order": 0,
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": false
+      },
+      {
+        "id": "routines",
+        "kind": "routines",
+        "name": "",
+        "order": 1,
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": true
+      },
+      {
+        "id": "<group 1>",
+        "kind": "manual",
+        "name": "group 1",
+        "order": 2,
+        "members": [],
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": false
+      },
+      {
+        "id": "<group 2>",
+        "kind": "manual",
+        "name": "group 2",
+        "order": 3,
+        "members": [],
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": false
+      },
+      {
+        "id": "sessions",
+        "kind": "sessions",
+        "name": "",
+        "order": 4,
+        "sortBy": "recency",
+        "ascending": false,
+        "show": {
+          "metadata": false,
+          "emptyGroups": false
+        },
+        "collapsed": false,
+        "groupBy": "none"
+      }
+    ],
+    "migratedFrom": 1,
+    "prefsSeeded": true
+  }
+}

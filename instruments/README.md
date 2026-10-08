@@ -18,6 +18,11 @@ run's `created-entries-<stamp>.txt` beside itself, and a sandbox run's manifest 
 folder would become a step of the real `-Undo` stack. Use one scratch copy for one sandbox at a
 time, for the same reason: `-Undo` takes the newest manifest beside the script.
 
+The whole proof of a build runs with one command, which makes its own sandboxes and scratch
+copies and removes them, and only reads the tool folder it is given:
+`node prove-tool.js --tool <tool folder> --receiving <key> --source <key>`. The steps below are
+what it does, for running one by hand.
+
 1. Build a sandbox signed in as the account that should receive the chats, groups and pins:
    `.\new-sandbox.ps1 -Name <name> -SignedInEmail <email>`. It prints the sandbox's profile folder.
    Claude Code's account files name only the account it last ran under, so for the other account
@@ -71,6 +76,27 @@ before trusting it.
 
 ## The tools
 
+- `prove-tool.js` — the proof of a build of the tool, in named passes: `static` (the `.ps1`
+  files parse in Windows PowerShell 5.1 and are ASCII; the shared reads and
+  `lib\Transcripts.ps1`), `run` (a run, its entries and plan, the calls forward with one left
+  unmade, and back, `-Undo`), `calls`, `source-by-id`, `source-from-settings`,
+  `source-from-list`, `as-source`, `config`, `list`, `export-import`, `sections` and
+  `left-alone`. Each pass builds its sandboxes from this computer's data and removes them, runs
+  its own scratch copy of the tool, reads what it expects (group names, labels, the sections)
+  from the sandbox's data, and has `make-faults.js` make the faults the checkers and
+  `check-sidebar-calls.js` must catch. `--pass <names>` runs some; `--keep` keeps the work
+  folder, which is kept anyway when something is wrong. PROOF INCOMPLETE names what this data could not test. It
+  needs Node and Windows PowerShell 5.1, and accounts with groups and pins; its header says what
+  each pass stages. Made 2026-10-08 from the drivers of that day's proofs.
+- `stage-sandbox.js` — stages states in a sandbox for `prove-tool.js`, or by hand: an account's
+  groups and pins taken out, a group with no chat, a chat filed, pinned or made newer than a
+  plan, a list without pins, the scratch config naming an account by its email or its id. It
+  writes nothing outside the sandboxes' folder. Its header lists the commands.
+- `make-faults.js` — makes one fault at a time in a checker's input (a plan, a list or export,
+  the settings file, a chat entry) or in a throwaway copy of the script, and checks that it is
+  caught by exactly the check meant for it, or that the result stays clean where the app makes
+  such a change itself. A fault runs only beside its undamaged input passing, and one this data
+  cannot stage is reported as not tested. Used by `prove-tool.js`; its header lists the modes.
 - `new-sandbox.ps1` — builds, compares or removes a sandbox: copies of the app's sidebar index,
   settings file, browser storage and IndexedDB, minimal account files naming the same accounts as
   Claude Code's real ones, and a junction (a folder link) to the real transcripts folder, which the
@@ -99,9 +125,12 @@ before trusting it.
   `-Sidebar` listed in the sandbox's copy of the app's settings file, the way the app was seen
   to make them, refuses what the tools refuse, and changes the receiving account's sidebar
   sections the way the app does (below). `--skip <n>` leaves one call unmade. It refuses to run
-  on anything but a sandbox.
+  on anything but a sandbox. `sidebar-sim-fixture.json` holds the sections the app wrote for one
+  account when two groups were created and filled (desktop app 2.26454.2.0, 2026-10-08), group
+  ids and names replaced; `prove-tool.js` compares the stand-in's sections with it.
 - `verify-sidebar.js` — checks, after the calls, that the receiving account's groups and pins in
-  the settings file are what the plan aims at (`desired` or `before`), that every other
+  the settings file are what the plan aims at (`desired` or `before`), or, when the plan leaves
+  the groups alone, that they and their sections were left as they were; that every other
   account's pins are as they were, that the account's sidebar sections are in step with its
   groups (below), and that nothing else in the file changed.
 - `verify-list.js` — checks the list of an account's groups and pinned chats the script saves for
@@ -162,6 +191,11 @@ before trusting it.
 - `chromium-read-localstorage.py` — opens a copy of a `Local Storage\leveldb` folder in Playwright's
   Chromium and reads keys through the browser itself. No network: every request is answered locally
   or aborted.
+- `scan-personal.js` — before anything is published: scans files and folders for the user's own
+  email addresses, account, organization, session and group ids, user name and any words given,
+  all read from this computer rather than written in it, with a control for each kind that must
+  match first; it prints counts and places, never the details. `--allow <file>::<line>` lets a
+  line through, such as a copyright notice. Usage in its header.
 - `webui-cache\` — how the app's web interface code was found, since the app downloads it rather
   than shipping it: `scan-cache.js` decodes every body in the app's HTTP cache and saves those
   containing given strings; `decode-build.js` decodes one download batch and finds modules by what
@@ -173,6 +207,18 @@ before trusting it.
   imports a minified name (names are local to each file). The web interface is rebuilt several
   times a day. Since 2026-10-08 the tool writes nothing the web interface stores, so these are
   for investigating, not a step before every install.
+  Added 2026-10-08, all read-only, each one's usage in its header: `cache-bodies.js` reads a
+  cached body wherever
+  Chromium keeps it, in an `f_` file or, for one under about 16 KB, inside the block files `data_1`
+  to `data_4`, which `scan-cache.js` and `decode-build.js` never see; it lists entries with their
+  times, searches the decoded bodies, writes one or all of them, and prints a response's headers
+  with the endpoint and certificate it came through. `export-of.js` gives the module-local name a
+  file exports under a given name, with its definition, case-sensitively. `leveldb-dump.js` reads
+  a live `Local Storage\leveldb` or IndexedDB folder in place: every key, or every version still
+  held (`read-localstorage.js` above reads given keys from a copy). `org-timeline.js` reads the
+  app's `main.log` files for the organization whose sign-in was active when each Code session
+  started, which the folder of a session's entry does not tell. `session-efforts.js` reads the
+  effort Claude Code recorded on each session's reply records.
 
 ## What to know before using them
 
@@ -226,6 +272,12 @@ before trusting it.
   `ArrayList` are fine. Make such a list with `::new()`, or turn it into an array with
   `.ToArray()` first. And an empty array returned from `$(...)` becomes nothing: assign it to a
   variable to keep it a list. Both met 2026-10-08; the first checked in both shells that day.
+- **Windows PowerShell 5.1 started with PowerShell 7's `PSModulePath` cannot load its own
+  modules**: a program run from PowerShell 7, such as Node, passes 7's module folders on to the
+  `powershell.exe` it starts, and 5.1 then finds no `Get-FileHash`, so `new-sandbox.ps1` fails.
+  PowerShell 7 corrects the variable when it starts `powershell.exe` itself; Node does not.
+  `prove-tool.js` and `make-faults.js` remove the variable before they start anything. Found
+  2026-10-08.
 - **Git Bash converts doubled backslashes in arguments to native programs.** To search a transcript
   for a Windows path as JSON stores it (two backslashes), pass four; test any such search with a
   string known to be present first.

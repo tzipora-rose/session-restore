@@ -10,6 +10,9 @@
 // each group that holds a chat has one such section under its id and name; any other was there
 // before the calls, unchanged, for a group that held no chat then; and the built-in sections
 // pinned, routines and sessions are there, as before apart from their order and groupBy.
+// A plan that leaves the groups alone needs the calls to have left them alone too: the groups
+// holding the chats the plan covers are those of before the calls, each with the same chats, and
+// every group section there before is still there under its name (an empty group shows only so).
 const fs = require('fs');
 const path = require('path');
 const [profile, planPath, aim, referencePath] = process.argv.slice(2);
@@ -40,6 +43,16 @@ const scope = (ep['dframe-group-scopes'] || {})[key] || { groups: [], assignment
 const target = plan[aim];
 // chats the tools cannot change, and chats made after the plan, are outside what the plan asks
 const inPlay = id => mine.has(id) && mine.get(id).changeable && !mine.get(id).newer;
+const refScope = (rep['dframe-group-scopes'] || {})[key] || { groups: [], assignments: {} };
+// the groups of a scope that hold chats the plan covers, by group id, each with those chats
+const filedById = s => {
+  const m = new Map();
+  for (const g of s.groups || []) {
+    const sessions = Object.keys(s.assignments || {}).filter(k => s.assignments[k] === g.id && k.startsWith('code:')).map(k => k.slice(5)).filter(inPlay);
+    if (sessions.length) m.set(g.id, { name: g.name, sessions });
+  }
+  return m;
+};
 
 if (target.groups !== null) {
   const want = target.groups.map(g => ({ name: g.name, sessions: g.sessions.filter(inPlay) })).filter(g => g.sessions.length);
@@ -48,7 +61,11 @@ if (target.groups !== null) {
   let ok = true;
   for (const g of want) { const h = have.find(x => x.name === g.name); if (!h || !sameSet(h.sessions, g.sessions)) { ok = false; console.log(`       "${g.name}": the plan has ${g.sessions.length}, the settings file ${h ? h.sessions.length : 0}`); } }
   check(ok, 'each group holds exactly the chats the plan files in it');
-} else console.log('  --   groups are not planned');
+} else {
+  const was = filedById(refScope), is = filedById(scope);
+  const same = was.size === is.size && [...was].every(([id, g]) => { const h = is.get(id); return h && h.name === g.name && sameSet(h.sessions, g.sessions); });
+  check(same, `groups are not planned, and the groups holding the plan's chats are as they were before the calls: ${[...was.values()].map(g => `"${g.name}" (${g.sessions.length})`).join(', ') || 'none'}`);
+}
 const pins = (ep['starred-local-code-sessions'] || []), refPins = (rep['starred-local-code-sessions'] || []);
 if (target.pinned !== null) {
   check(sameSet(pins.filter(inPlay), target.pinned.filter(inPlay)), `the account's pinned chats are the plan's ${target.pinned.filter(inPlay).length}`);
@@ -60,7 +77,7 @@ check(JSON.stringify(pins.filter(id => !mine.has(id))) === JSON.stringify(refPin
 const SECTIONS = 'dframe-code-sections';
 const secNow = (ep[SECTIONS] || {})[key], secRef = (rep[SECTIONS] || {})[key];
 const savedNow = scope.groups;
-const savedRef = new Set((((rep['dframe-group-scopes'] || {})[key]) || { groups: [] }).groups.map(g => g.id));
+const savedRef = new Set((refScope.groups || []).map(g => g.id));
 if (secNow === undefined || !Array.isArray(secNow.sections)) {
   check(secNow === undefined && secRef === undefined && savedNow.length === 0, 'the account has no sidebar sections saved' + (secNow !== undefined ? ', and its entry holds no list of them' : '') + (secRef !== undefined ? ', though it had before the calls' : '') + (savedNow.length ? `, though ${savedNow.length} of its groups hold chats` : ''));
 } else {
@@ -90,6 +107,12 @@ if (secNow === undefined || !Array.isArray(secNow.sections)) {
   check(wrongB.length === 0, 'the built-in sections pinned, routines and sessions are there' + (secRef ? ', as before apart from order and groupBy' : ''));
   if (wrongB.length) console.log('       ' + wrongB.join('; '));
   if (secRef) check(canon(without(secNow, 'sections')) === canon(without(secRef, 'sections')), 'the account\'s entry of sections is otherwise as before');
+  if (target.groups === null && secRef) {
+    const before = refS.filter(r => r.kind === 'manual');
+    const lost = before.filter(r => !S.some(s => s.kind === 'manual' && s.id === r.id && s.name === r.name));
+    check(lost.length === 0, `groups are not planned, and every group section there before the calls is still there, under its name (${before.length})`);
+    if (lost.length) console.log('       ' + lost.map(s => `${JSON.stringify(s.name)} (${s.id})`).join(', '));
+  }
 }
 
 // nothing else in the settings file moved
