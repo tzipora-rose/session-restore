@@ -1,0 +1,7 @@
+{
+  "copyGroupsFromEmail": "you@example.com",
+  "autoUpdateCopyGroupsFromEmail": 0,
+  "titleSkipPrefixes": [
+    "The opening words of text your own setup injects into a first message"
+  ]
+}

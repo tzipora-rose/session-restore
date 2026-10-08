@@ -1,0 +1,6 @@
+# your own settings, and what each run writes beside the script
+session-restore.config.json
+created-entries*.txt
+ARCHIVE/
+*.session-restore.tmp
+__pycache__/
