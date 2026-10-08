@@ -472,6 +472,8 @@ on copied profiles signed in as each of two accounts in turn, against the deskto
 
 ## License
 
+Copyright (C) 2026 tzipora-rose
+
 session-restore is free software: you can redistribute it and/or modify it under the terms of
 the GNU General Public License, version 3, as published by the Free Software Foundation. It is
 distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
