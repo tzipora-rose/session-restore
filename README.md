@@ -11,6 +11,9 @@ One script, `session-restore.ps1`, for the Claude desktop app on Windows. It doe
    Each entry it creates is modelled on the same chat's entry in another account: its dates,
    folder, title, model, effort, archived state and earlier transcripts. A chat no other account
    lists is built from its transcript. A chat's earlier transcripts get no entry of their own.
+   These are the sessions of the app's Code tab, whose transcripts are on this computer. The
+   chats of its Chat tab are kept on Anthropic's servers under the account that made them: the
+   script cannot see or move them, and only signing in to that account shows them.
 2. **Folders.** If `session-restore.config.json` names an account in `copyGroupsFromEmail`, each
    chat the signed-in account already lists goes in the folder its twin in that account names.
 3. **Groups and pins.** For the same account, it works out what has to change so that the
@@ -25,15 +28,22 @@ One script, `session-restore.ps1`, for the Claude desktop app on Windows. It doe
 
 ## Getting started
 
-- **What it needs:** Windows, the Claude desktop app, and Windows PowerShell 5.1, which comes
-  with Windows 10 and 11. The test instruments also need Node.js.
+- **What it needs:** Windows, the Claude desktop app (the packaged app or an unpackaged install;
+  see "Where the app keeps its data"), and Windows PowerShell 5.1, which comes with Windows 10
+  and 11. The test instruments also need Node.js.
 - **Where it goes:** anywhere. Every path the script uses is derived from its own folder, the
   user profile, or the config, so the folder can be moved or renamed.
 - **Its settings:** copy `session-restore.config.example.json` to `session-restore.config.json`
   beside the script, and fill it in (below). Without it, the script brings back chats and plans
   no groups.
-- **Running it:** from its folder, `powershell -ExecutionPolicy Bypass -File .\session-restore.ps1`
-  with the switches below; `-DryRun` first shows what a run would do.
+- **Running it:** open a PowerShell window (Windows PowerShell, from the Start menu), go to the
+  script's folder with `cd`, and run `powershell -ExecutionPolicy Bypass -File .\session-restore.ps1`
+  with the switches below; `-DryRun` first shows what a run would do. Started from Explorer
+  instead ("Run with PowerShell" in the script's right-click menu, or a double-click where
+  Windows is set to run scripts that way), the script runs itself again in the same window with
+  `-NoExit`, so that the window stays open when it ends, an error included, and what it said can
+  be read; close the window when you are done. Such a start passes no switch, so it is a real
+  run, not a preview.
 - It works with the files the Claude desktop app keeps, whose form Anthropic can change with any
   update; it was checked against the versions named under "How it was verified". It is not made
   by Anthropic.
@@ -41,18 +51,40 @@ One script, `session-restore.ps1`, for the Claude desktop app on Windows. It doe
 
 ## Why this exists (the mechanics)
 
-The app is MSIX/Store-packaged, so its real data store is
-`AppData\Local\Packages\Claude_<suffix>\LocalCache\Roaming\Claude\` — a normal console cannot
-follow the `AppData\Roaming\Claude` alias the app presents. Inside that store:
+The conversations and the app's sidebar are kept apart (where the app's data folder is, is the
+next section):
 
 - **Transcripts** (the conversations themselves) live under `~\.claude\projects\<project>\*.jsonl`
   and are **account-agnostic** — they survive account switches untouched.
-- **The sidebar index** is per-account: `claude-code-sessions\<accountUuid>\<orgUuid>\*.json`,
-  one small JSON per listed conversation, each naming its transcript in `cliSessionId`. The
-  sidebar shows ONLY conversations with an entry under the CURRENT account+org.
+- **The sidebar index** is per-account, in the app's data folder:
+  `claude-code-sessions\<accountUuid>\<orgUuid>\*.json`, one small JSON per listed conversation,
+  each naming its transcript in `cliSessionId`. The sidebar shows ONLY conversations with an
+  entry under the CURRENT account+org.
 - **Groups and pins name conversations by their index entry id** (`local_<guid>`), which differs
   between accounts. That is why neither carries over a switch: each chat is matched to its twin
   in the other account through the transcript both entries point at.
+
+### Where the app keeps its data
+
+| How the app is installed | Its data folder |
+|---|---|
+| the packaged (MSIX) app | `AppData\Local\Packages\Claude_<suffix>\LocalCache\Roaming\Claude\` |
+| an unpackaged (Squirrel) install, its program in `AppData\Local\AnthropicClaude\` | `AppData\Roaming\Claude\` |
+| a packaged app installed over an unpackaged one | `AppData\Roaming\Claude\`, which the packaged app goes on using; its package folder has no `LocalCache\Roaming\Claude` |
+
+The script decides as the app's own code does: the package folder's `LocalCache\Roaming\Claude`
+when one exists, else `AppData\Roaming\Claude`. Every run starts by naming the folder it uses
+(`App data: ...`). If the packaged app has a data folder but no Code session in it, the script
+stops and says so rather than use a folder an unpackaged install left behind. On a computer with
+both installs, each with Code sessions, it uses the packaged app's.
+
+To see which install a computer has, run `Get-AppxPackage Claude` in Windows PowerShell: it
+lists a package only for the packaged app. For the packaged app, a console outside the app
+cannot reach the data folder as `AppData\Roaming\Claude`: that path is an alias only the app's
+own programs see. Two more places, which an organization's settings choose, are not supported:
+`%LOCALAPPDATA%\Claude-Data`, where the app keeps its data when `AppData` is redirected to a
+network share and a managed setting asks for it, and `%LOCALAPPDATA%\Claude-3p`, its data folder
+in its third-party mode.
 
 ### Why the groups and pins are left to the app
 
@@ -293,8 +325,8 @@ plan had been applied, since chats filed or pinned afterwards differ from it by 
 
 ## What the chat step does
 
-1. **Auto-detects everything — no hardcoded IDs:** the package folder (`Claude_*` containing
-   `claude-code-sessions`), the current account (`config.json` → `lastKnownAccountUuid`, falling
+1. **Auto-detects everything — no hardcoded IDs:** the app's data folder (see "Where the app
+   keeps its data"), the current account (`config.json` → `lastKnownAccountUuid`, falling
    back to the most recently written account folder), and that account's org. The org comes from,
    in order: the sidebar's own record of the account it last showed; Claude Code's account file,
    when it names the same account; the org folder holding the newest sidebar entry; the most
@@ -307,8 +339,12 @@ plan had been applied, since chats filed or pinned afterwards differ from it by 
      (`cliSessionId`, else `unarchivedCliSessionId`);
    - every transcript that an entry, in any account, keeps as another part of its chat
      (`priorCliSessionIds` and `preClearCliSessionId`, where the app records a chat's earlier
-     transcripts when the chat is rewound or cleared). These are not chats of their own; the
-     output says how many were left out.
+     transcripts when the chat is rewound or cleared). These are not chats of their own.
+
+   It then says how many transcripts it found, how many this account already lists, how many
+   are earlier parts of another chat, and how many it does not list: those are the chats a run
+   brings back, so "Would create 0 entries" after it means this account already lists every
+   chat on the computer.
 3. **Finds the chat's twin**: the same chat's entry in another account (in the account
    `copyGroupsFromEmail` names first, else the most recently active). The new entry takes from
    it what steps 4 to 8 name; a chat no other account lists is built from its transcript.
@@ -352,9 +388,14 @@ to them and replace them.
 - **The script never writes into the app's settings file, its browser storage or its IndexedDB.**
   It reads the browser storage through a private copy of the folder.
 - **Folders** are written only while the app is fully closed, since the app rewrites its chat
-  entries while it runs: the script checks for the package's running processes and for the lock
-  file of the browser storage, and says so when it leaves the folders alone. The chat entries
-  and the plan are made either way.
+  entries while it runs. The script counts the app as running when a process in the user's own
+  Windows session runs a program from the packaged app's install folder or from an unpackaged
+  install's `AppData\Local\AnthropicClaude\`, or when the lock file of its browser storage is
+  held, and says so when it leaves the folders alone. It reads each process's program with a
+  Windows call that also works for an app running with administrator rights when the console
+  is not. The packaged app's background service, CoworkVMService, runs from its install folder
+  all the time, in another session, and is not counted. The chat entries and the plan are made
+  either way.
 - **Backups first.** Before it moves a chat to another folder, and before it fills in the
   config's account, it copies the file to `.session-restore\backups\<stamp>\` in the user
   profile and checks the copy's SHA-256 against the original.
@@ -381,6 +422,11 @@ to them and replace them.
   app's naming rule), a transcript's first lines, the time of its last timestamped record, and
   whether one copy of a transcript holds messages another copy lacks. Each read opens the file
   so that Claude Code can keep appending to it, and closes it before returning.
+- `lib\DesktopApp.ps1` — where the app keeps its data, whether it is running, and whether the
+  script was started from Explorer. To read another process's program it compiles a few lines
+  of C# with `Add-Type` the first time it needs them; where Windows does not allow that, it falls
+  back on PowerShell's own way, which does not see an app running with administrator rights from
+  a console that is not.
 - `session-restore.config.json` — your settings (personal).
 - `created-entries-<stamp>.txt` — one manifest per run (the chat side of the `-Undo` stack).
 
@@ -464,6 +510,29 @@ The plan and the calls were checked on 2026-10-08, on copied profiles, against t
   kept pins left the pins alone; `-Undo` turned an import's plan around and undid no run. Six
   deliberate faults in an import's plan and one in an export were each caught. A run after a
   switch, and the eleven cases of the calls, behaved as before.
+- **Other installs, whether the app is running, and starts from Explorer** (2026-10-09, desktop
+  app 2.26454.2.0, copied profiles). With the app's data moved to `AppData\Roaming\Claude` and no
+  package folder, as an unpackaged install has it, a run found the data there and named it,
+  brought back a chat whose entry had been taken out, writing the new entry there, and made its
+  plan; `-Sidebar` listed the calls and, once they were made, said the sidebar matched; the
+  independent scripts confirmed the entry, the plan and the sidebar, and `-Undo` left the copied
+  profile as it was built. With a package folder holding no data folder, the data in
+  `AppData\Roaming\Claude` was used; with both places holding Code sessions, the packaged app's
+  was used and the other left byte for byte as it was; the packaged app's data without Code
+  sessions, and no data at all, were each refused with nothing written. A stand-in program
+  running from the profile's `AppData\Local\AnthropicClaude` made `-Undo` of a run that moved
+  chats refuse and a run leave a chat's folder alone, each going ahead once it stopped. With the
+  packaged app running, its processes were found and its background service, in another Windows
+  session, was not; from a console started by Explorer, at Medium integrity while the app ran
+  elevated, its main process was found, which PowerShell's own way of reading a process's
+  program misses. Started the way "Run with PowerShell" starts it, the script ran itself again
+  in the same window with `-NoExit` and its switches, and the window stayed open; with
+  `-NoExit` given, it did not run again. Each run's count of transcripts matched the count
+  taken independently. Six deliberate faults in `lib\DesktopApp.ps1`, and one more seen from a
+  console at Medium integrity, were each caught by the check meant for it. The checks above
+  that the test instruments run (the plan, the calls and their cases, the saved list, export and
+  import, the reads) passed again on this build; the two tried once on the real app (the
+  sidebar tools themselves, and where the tool's own files land) were not repeated.
 
 The chat step as it is (earlier transcripts left out; title, model, effort, archived state
 and earlier transcripts taken from the twin; shared transcript reads) was checked on 2026-10-04

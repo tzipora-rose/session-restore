@@ -22,6 +22,9 @@
 //   script      <tool folder> <profile> <receiving key> <work folder>
 //               faults in throwaway copies of session-restore.ps1 that check-sidebar-calls.js must
 //               catch
+//   desktop-lib <tool folder> <work folder>
+//               faults in throwaway copies of lib\DesktopApp.ps1 that check-desktop-app.js must
+//               catch
 // The checkers are read from this file's folder. Exit 0: every case as it must be; 1: a case
 // wrong; 3: no case wrong but some not tested.
 'use strict';
@@ -287,6 +290,49 @@ modes.script = (r, [tool, profile, receivingKey, work]) => {
     const x = spawnSync(process.execPath, [path.join(here, 'check-sidebar-calls.js'), copy, profile, receivingKey], { encoding: 'utf8' });
     const failed = (x.stdout || '').split(/\r?\n/).filter(l => /^\s+FAIL /.test(l));
     r.ok(x.status === 1 && failed.some(l => l.includes(wants)), `${title}: check-sidebar-calls.js must catch it`, `${failed.length} case(s) failed`);
+    fs.rmSync(copy, { recursive: true, force: true });
+  }
+};
+
+modes['desktop-lib'] = (r, [tool, work]) => {
+  const checkerArgs = dir => [path.join(here, 'check-desktop-app.js'), dir];
+  const control = runChecker(checkerArgs(tool));
+  if (control.status !== 0 && control.status !== 3) { r.ok(false, 'control: check-desktop-app.js passes on the undamaged library', `exit ${control.status}, ${JSON.stringify(control.fails)}`); return; }
+  r.ok(true, 'control: check-desktop-app.js passes on the undamaged library', control.last);
+  const untested = control.out.split(/\r?\n/).filter(l => l.startsWith('  --   ')).join('\n');
+  const cases = [
+    ["an unpackaged install's folder preferred to the packaged app's",
+      "  $roaming = Join-Path $UserProfile 'AppData\\Roaming\\Claude'\n",
+      "  $roaming = Join-Path $UserProfile 'AppData\\Roaming\\Claude'\n  if (Test-Path -LiteralPath (Join-Path $roaming 'claude-code-sessions') -PathType Container) { $result.Root = $roaming; return $result }\n",
+      ["Find-AppData, both, each with Code sessions", "Find-AppData, the packaged app's data without Code sessions, an unpackaged install's with"]],
+    ['a folder an unpackaged install left used while the packaged app has its own',
+      '  if ($packaged.Count -gt 0) {\n', '  if ($false) {\n',
+      ["Find-AppData, the packaged app's data without Code sessions, an unpackaged install's with", "Find-AppData, the packaged app's data without Code sessions: none"]],
+    ["another Windows session's processes counted",
+      '    if ($process.SessionId -ne $session) { continue }\n', '',
+      ['no process of another Windows session is counted', 'every process found runs in this Windows session'], 'no process of another Windows session counted'],
+    ['the processes found wrapped in a second array',
+      '  $running = Get-AppProcesses $Roots\n', '  $running = @(Get-AppProcesses $Roots)\n',
+      ['and nothing counts as running', 'no folders given', 'a folder no program runs from', 'a storage folder whose LOCK another program holds', 'the LOCK let go']],
+    ['-NoExit not looked for',
+      "  return -not ($CommandLine -match '(?i)(^|\\s)\"?[-/]noe(x(i(t)?)?)?\"?(\\s|$)')\n", '  return $true\n',
+      ['Test-LaunchedForScript, -NoExit:', 'Test-LaunchedForScript, -noexit:', 'Test-LaunchedForScript, -noe:', 'Test-LaunchedForScript, -noex:', 'Test-LaunchedForScript, -noexi:', 'Test-LaunchedForScript, "-NoExit" in quotes', 'Test-LaunchedForScript, /NoExit']],
+    ['a command line that names no script taken as one',
+      '  if ($CommandLine.IndexOf($ScriptName, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }\n', '',
+      ['Test-LaunchedForScript, a PowerShell window opened from the Start menu', 'Test-LaunchedForScript, another script']],
+  ];
+  for (const [title, from, to, wanted, needs] of cases) {
+    if (needs && untested.includes(needs)) { r.skip(title, 'its check is not tested on this computer'); continue; }
+    const copy = path.join(work, 'tool-desktop-fault');
+    fs.rmSync(copy, { recursive: true, force: true });
+    fs.mkdirSync(path.join(copy, 'lib'), { recursive: true });
+    for (const n of fs.readdirSync(path.join(tool, 'lib'))) fs.copyFileSync(path.join(tool, 'lib', n), path.join(copy, 'lib', n));
+    const file = path.join(copy, 'lib', 'DesktopApp.ps1');
+    const text = fs.readFileSync(file, 'utf8');
+    const count = text.split(from).length - 1;
+    if (count !== 1) { r.ok(false, title, `the text to change occurs ${count} time(s) in lib\\DesktopApp.ps1; this case must be brought up to date with it`); continue; }
+    fs.writeFileSync(file, text.replace(from, () => to));
+    expectChecks(r, `${title}: check-desktop-app.js must catch it`, checkerArgs(copy), wanted);
     fs.rmSync(copy, { recursive: true, force: true });
   }
 };

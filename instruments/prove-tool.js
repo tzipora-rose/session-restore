@@ -32,6 +32,24 @@
 //                          fault), chats created after the file, a list without pins, -Undo
 //     sections             sidebar-sim.js against the sections the app was seen to write
 //     left-alone           a plan that leaves the groups alone: only pin calls, and its faults
+//     desktop-app          check-desktop-app.js on lib\DesktopApp.ps1, and the faults in it that
+//                          check must catch
+//     unpackaged           the app's data where an unpackaged install keeps it (AppData\Roaming\
+//                          Claude, no package folder): a dry run, the run, its entries and plan,
+//                          the calls, -Undo; the same with a package folder holding no data; both
+//                          places with Code sessions (the packaged app's used, the other left
+//                          alone); the packaged app's data without Code sessions, and no data at
+//                          all (each refused, nothing written)
+//     app-running          a stand-in program (a copy of ping.exe) running from the sandbox's
+//                          AppData\Local\AnthropicClaude: -Undo of a run that moved chats refuses,
+//                          and a run leaves a chat's folder alone; each goes ahead once it stops
+//   and one pass run only when named, since it opens minimized windows on the desktop through
+//   Explorer for a few seconds each:
+//     explorer             what a console started by Explorer, at Medium integrity, sees of the
+//                          app's processes (its main one, when the app runs elevated, which a
+//                          fault using Process.Path must miss); a run started the way "Run with
+//                          PowerShell" starts one runs again in its window with -NoExit, with its
+//                          switches; and not when -NoExit is given
 //   --keep   keep the work folder (the scratch copies and every run's output) even when clean
 // It needs Windows, Node, Windows PowerShell 5.1 and the Claude desktop app's data for both
 // accounts; the source with at least one group holding a chat; for "calls", 215 chats of the
@@ -46,7 +64,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 const stage = require('./stage-sandbox.js');
 const faults = require('./make-faults.js');
 // Windows PowerShell 5.1 started with PowerShell 7's PSModulePath finds 7's copies of the modules
@@ -55,7 +73,8 @@ const faults = require('./make-faults.js');
 for (const k of Object.keys(process.env)) if (/^psmodulepath$/i.test(k)) delete process.env[k];
 
 const here = __dirname;
-const ALL = ['static', 'run', 'calls', 'source-by-id', 'source-from-settings', 'source-from-list', 'as-source', 'config', 'list', 'export-import', 'sections', 'left-alone'];
+const ALL = ['static', 'desktop-app', 'run', 'calls', 'source-by-id', 'source-from-settings', 'source-from-list', 'as-source', 'config', 'list', 'export-import', 'sections', 'left-alone', 'unpackaged', 'app-running'];
+const ON_REQUEST = ['explorer'];
 const opt = { pass: ALL.join(','), keep: false };
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
@@ -70,7 +89,7 @@ if (!opt.tool || !keyRe.test(opt.receiving || '') || !keyRe.test(opt.source || '
   process.exit(2);
 }
 const passes = opt.pass.split(',').map(s => s.trim()).filter(Boolean);
-for (const p of passes) if (!ALL.includes(p)) { console.error('unknown pass ' + p + '; the passes are ' + ALL.join(', ')); process.exit(2); }
+for (const p of passes) if (!ALL.includes(p) && !ON_REQUEST.includes(p)) { console.error('unknown pass ' + p + '; the passes are ' + ALL.concat(ON_REQUEST).join(', ')); process.exit(2); }
 for (const n of ['session-restore.ps1', 'session-restore.config.json', 'lib']) if (!fs.existsSync(path.join(opt.tool, n))) { console.error(`the tool folder has no ${n}: ${opt.tool}`); process.exit(2); }
 const RK = opt.receiving, SK = opt.source;
 const [recvAcct] = RK.split('/'), [srcAcct] = SK.split('/');
@@ -236,6 +255,105 @@ const template = /^This is the account session-restore\.config\.json names in co
 const savedFor = (label, key) => new RegExp(`^Saved for a switch: the groups and pins of ${esc(label)}: .+, in .+\\\\sidebar-list-${esc(key.split('/')[0])}\\.json\\. Read back, the file holds exactly these\\.$`);
 const safeName = s => s.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
 
+// ---------------------------------------------------------------- counts, other places, programs
+const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const sha = f => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex').toUpperCase();
+// the transcripts the tool scans: the .jsonl files directly in each project folder, a session
+// stored in more than one folder counted once
+function transcriptCount(b) {
+  const root = path.join(b.profile, '.claude', 'projects'), ids = new Set();
+  for (const d of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    for (const f of fs.readdirSync(path.join(root, d.name), { withFileTypes: true })) if (f.isFile() && /\.jsonl$/i.test(f.name)) ids.add(f.name.slice(0, -6).toLowerCase());
+  }
+  return ids.size;
+}
+const countsRe = /^Transcripts on this computer: (\d+)\. Already listed in this account: (\d+)\. Earlier parts of another chat, never listed on their own: (\d+)\. Not listed in this account: (\d+)\.$/;
+// what a run says of the transcripts it found, against those counted here just before and just
+// after it, since a session can begin while it runs
+function checkCounts(out, before, after, title) {
+  const m = out.map(l => countsRe.exec(l)).find(Boolean);
+  if (!m) { ok(false, `${title} says how many transcripts it found and how many this account lists`); show(out); return null; }
+  const [all, listed, parts, notListed] = m.slice(1).map(Number);
+  ok(all >= Math.min(before, after) && all <= Math.max(before, after), `${title}: the ${all} transcripts it found are the ones this computer holds (${before} counted here before it, ${after} after)`);
+  ok(listed + parts + notListed === all, `${title}: listed here (${listed}), earlier parts of another chat (${parts}) and not listed (${notListed}) add up to them`);
+  return { all, listed, parts, notListed };
+}
+const skippedIn = out => out.filter(l => /^skip [^ ]+: /.test(l)).length;
+// renames a folder, waiting out a moment when another program, such as a virus scanner, holds a
+// file in it
+function moveDir(from, to) {
+  for (let k = 0; ; k++) {
+    try { fs.renameSync(from, to); return; } catch (x) { if (k >= 40 || !/^(EPERM|EBUSY|EACCES)$/.test(x.code || '')) throw x; sleep(250); }
+  }
+}
+// a sandbox's app data moved to where an unpackaged install keeps it, AppData\Roaming\Claude,
+// its package folder set aside, or kept without its data folder as a packaged app installed over
+// an unpackaged one has it; and back where new-sandbox.ps1 built it, where the checkers read it
+const roamingOf = b => path.join(b.profile, 'AppData', 'Roaming', 'Claude');
+const packagesOf = b => path.join(b.profile, 'AppData', 'Local', 'Packages');
+function toRoaming(b, keepPackageFolder = false) {
+  fs.mkdirSync(path.dirname(roamingOf(b)), { recursive: true });
+  moveDir(b.store, roamingOf(b));
+  if (!keepPackageFolder) moveDir(packagesOf(b), packagesOf(b) + '.aside');
+}
+function toPackaged(b) {
+  if (fs.existsSync(packagesOf(b) + '.aside')) moveDir(packagesOf(b) + '.aside', packagesOf(b));
+  if (fs.existsSync(roamingOf(b))) moveDir(roamingOf(b), b.store);
+}
+// a path the tool wrote while the data was in AppData\Roaming\Claude, where it is now
+const fromRoaming = (b, p) => (p.toLowerCase().startsWith(roamingOf(b).toLowerCase()) ? b.store + p.slice(roamingOf(b).length) : p);
+function translatedManifest(b, manifest) {
+  const out = path.join(b.sandbox, 'manifest-translated.txt');
+  fs.writeFileSync(out, fs.readFileSync(manifest, 'utf8').split(/\r?\n/).filter(Boolean).map(l => fromRoaming(b, l)).join('\r\n'));
+  return out;
+}
+function translatedBackup(b, backupDir) {
+  const out = path.join(b.sandbox, 'backup-translated');
+  fs.rmSync(out, { recursive: true, force: true });
+  fs.cpSync(backupDir, out, { recursive: true });
+  const record = readJson(path.join(out, 'backup.json'));
+  for (const e of record.entries || []) e.path = fromRoaming(b, e.path);
+  fs.writeFileSync(path.join(out, 'backup.json'), JSON.stringify(record, null, 2));
+  return out;
+}
+// every file under a folder, with its hash
+function hashTree(dir) {
+  const map = {};
+  const walk = d => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else map[path.relative(dir, p)] = sha(p); } };
+  walk(dir);
+  return map;
+}
+// a stand-in for the app's program: a copy of ping.exe, named claude.exe, in the sandbox's
+// unpackaged install folder, running until it is stopped
+function startStandin(b) {
+  const exe = path.join(b.profile, 'AppData', 'Local', 'AnthropicClaude', 'app-9.9.9', 'claude.exe');
+  fs.mkdirSync(path.dirname(exe), { recursive: true });
+  if (!fs.existsSync(exe)) fs.copyFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'PING.EXE'), exe);
+  const child = spawn(exe, ['-n', '900', '127.0.0.1'], { windowsHide: true, stdio: 'ignore' });
+  for (let k = 0; k < 50 && !alive(child.pid); k++) sleep(100);
+  return child;
+}
+function stopStandin(child) {
+  if (alive(child.pid)) child.kill();
+  for (let k = 0; k < 100 && alive(child.pid); k++) sleep(100);
+  return !alive(child.pid);
+}
+// the folder Claude Code keeps a working folder's transcripts in, named as the desktop app names it
+function appFolderName(n) {
+  const r = n.replace(/[^a-zA-Z0-9]/g, '-');
+  if (r.length <= 200) return r;
+  let i = 0;
+  for (let e = 0; e < n.length; e++) i = (i << 5) - i + n.charCodeAt(e) | 0;
+  return `${r.slice(0, 200)}-${Math.abs(i).toString(36)}`;
+}
+// the tool's own scheme for a run's stamp: local time, yyyyMMdd-HHmmss
+function runStamp(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
 // ---------------------------------------------------------------- the passes
 const pass = {};
 
@@ -263,10 +381,19 @@ pass.run = () => {
   stage.wipe(b.prefs, RK, b.entries(RK));
   const extra = pinsReplaced(b);
   if (!extra) skip('a pin the source does not have', 'no chat of the receiving account to pin');
+  let before = transcriptCount(b);
   let out = tool(b, dir, ['-DryRun']);
   expect(out, /^DRY RUN - /, 'a dry run says what it would do');
+  const dryCounts = checkCounts(out, before, transcriptCount(b), 'the dry run');
+  const would = out.map(l => /^DRY RUN - nothing written\. Would create (\d+) entries:$/.exec(l)).find(Boolean);
+  if (dryCounts && would) ok(Number(would[1]) === dryCounts.notListed - skippedIn(out), `it would create an entry for each chat not listed here (${would[1]} of ${dryCounts.notListed})`);
   ok(!fs.existsSync(b.plan) && !manifests(dir).length && !fs.existsSync(path.join(b.data, 'backups')), 'and writes no plan, manifest or backup');
+  before = transcriptCount(b);
   out = tool(b, dir, []);
+  const runCounts = checkCounts(out, before, transcriptCount(b), 'the run');
+  const made = manifests(dir).pop();
+  const madeCount = made ? fs.readFileSync(path.join(dir, made), 'utf8').split(/\r?\n/).filter(Boolean).length : 0;
+  if (runCounts) ok(madeCount === runCounts.notListed - skippedIn(out), `it made an entry for each chat not listed here (${madeCount} of ${runCounts.notListed})`);
   const label = labelOf(srcAcct);
   expect(out, new RegExp(`^--- groups, pins and folders: as in ${esc(label)} ---$`), 'the run names the source account');
   expect(out, new RegExp(`^Groups in ${esc(label)} \\(read from the sidebar's own storage\\): .+`), "its groups are read from the sidebar's own storage");
@@ -683,6 +810,331 @@ pass['left-alone'] = () => {
   fs.writeFileSync(b.prefs, asBuilt);
   tool(b, dir, ['-Undo']);
   compareBox(b, '-Undo, then the sandbox is as it was built');
+  removeBox(b);
+};
+
+pass['desktop-app'] = () => {
+  const dir = toolCopy('desktop-app');
+  const x = node([instrument('check-desktop-app.js'), dir]);
+  if (x.status === 3) {
+    ok(true, 'check-desktop-app.js', x.last);
+    for (const l of x.lines.filter(y => y.startsWith('  --   '))) skip('check-desktop-app.js: ' + l.slice(7).split(': not tested')[0], 'not tested on this computer');
+  } else {
+    ok(x.status === 0, 'check-desktop-app.js', x.status === 0 ? x.last : `exit ${x.status}`);
+    if (x.status !== 0) show(x.lines);
+  }
+  mergeFaults('desktop-lib', [dir, work]);
+};
+
+pass.unpackaged = () => {
+  const dir = toolCopy('unpackaged');
+  const b = newBox('srp-unpackaged', recvAcct);
+  setConfig(dir, srcAcct, 0);
+  const asBuilt = fs.readFileSync(b.prefs);
+  const roaming = roamingOf(b), sessions = path.join(b.store, 'claude-code-sessions');
+  const appLine = where => new RegExp(`^App data: ${esc(where)}$`);
+  stage.wipe(b.prefs, RK, b.entries(RK));
+  // a chat of this account that the source also lists, its entry taken out, so that the run has
+  // a chat to bring back into AppData\Roaming\Claude
+  const gone = removableEntry(b);
+  if (gone) fs.unlinkSync(gone.file);
+  else skip('an entry written into AppData\\Roaming\\Claude', 'no chat of this account is listed by the source too');
+  try {
+    // an unpackaged install: no package folder, the data in AppData\Roaming\Claude
+    toRoaming(b);
+    let before = transcriptCount(b);
+    let out = tool(b, dir, ['-DryRun']);
+    expect(out, appLine(roaming), 'no package folder: the run finds the data in AppData\\Roaming\\Claude, and names it');
+    const dryCounts = checkCounts(out, before, transcriptCount(b), 'its dry run');
+    const would = out.map(l => /^DRY RUN - nothing written\. Would create (\d+) entries:$/.exec(l)).find(Boolean);
+    if (dryCounts && would) ok(Number(would[1]) === dryCounts.notListed - skippedIn(out) && (!gone || dryCounts.notListed >= 1), `it would create an entry for each chat not listed (${would[1]} of ${dryCounts.notListed})`);
+    ok(!fs.existsSync(b.plan) && !manifests(dir).length, 'the dry run writes no plan and no manifest');
+    before = transcriptCount(b);
+    out = tool(b, dir, []);
+    expect(out, appLine(roaming), 'the run works there');
+    const runCounts = checkCounts(out, before, transcriptCount(b), 'the run');
+    const planned = expect(out, /^Sidebar plan saved: /, 'and saves a plan');
+    const m = manifests(dir).pop();
+    if (gone) {
+      const madeLines = m ? fs.readFileSync(path.join(dir, m), 'utf8').split(/\r?\n/).filter(Boolean) : [];
+      ok(madeLines.length >= 1 && madeLines.every(l => l.toLowerCase().startsWith(roaming.toLowerCase() + '\\')) && (!runCounts || madeLines.length === runCounts.notListed - skippedIn(out)), `it wrote ${madeLines.length} entry file(s), one for each chat not listed, all in AppData\\Roaming\\Claude`);
+    }
+    toPackaged(b);
+    if (m) {
+      const args = [instrument('verify-entries.js'), b.profile, translatedManifest(b, path.join(dir, m)), RK, SK, b.fingerprints];
+      const backup = path.join(b.data, 'backups', m.replace(/^created-entries-|\.txt$/g, ''));
+      if (fs.existsSync(backup)) args.push(translatedBackup(b, backup));
+      checker('verify-entries.js on that run, the data put back where the checkers read it', args);
+    } else expect(out, /^Nothing to create/, 'the run created no entry, and says so');
+    if (planned) {
+      checker('verify-plan.js on its plan', [instrument('verify-plan.js'), b.profile, b.plan, SK, RK]);
+      const ref = path.join(b.sandbox, 'prefs-before-calls.json');
+      fs.copyFileSync(b.prefs, ref);
+      toRoaming(b);
+      out = tool(b, dir, ['-Sidebar']);
+      const listed = expect(out, /^\d+ call\(s\) left for the app's sidebar tools/, '-Sidebar lists the calls, reading AppData\\Roaming\\Claude');
+      toPackaged(b);
+      if (listed) {
+        const x = node([instrument('sidebar-sim.js'), b.profile, RK, b.calls]);
+        ok(x.status === 0, 'sidebar-sim.js makes them', x.last);
+        toRoaming(b);
+        out = tool(b, dir, ['-Sidebar']);
+        expect(out, /^The sidebar matches the plan\. Nothing is left to do\.$/, 'then -Sidebar says the sidebar matches the plan');
+        toPackaged(b);
+        checker('verify-sidebar.js, aim desired', [instrument('verify-sidebar.js'), b.profile, b.plan, 'desired', ref]);
+      }
+    }
+    fs.writeFileSync(b.prefs, asBuilt);
+    toRoaming(b);
+    out = tool(b, dir, ['-Undo']);
+    expect(out, /^Org dir now has \d+ entries\.$/, '-Undo walks the run back there');
+    toPackaged(b);
+    if (gone) fs.writeFileSync(gone.file, gone.bytes);
+    compareBox(b, 'put back where new-sandbox.ps1 built it, the entry taken out put back, the sandbox is as it was built');
+
+    // a packaged app installed over an unpackaged one: a package folder holding no data folder
+    toRoaming(b, true);
+    out = tool(b, dir, ['-DryRun']);
+    expect(out, appLine(roaming), 'a package folder holding no data folder: the data in AppData\\Roaming\\Claude is used');
+    toPackaged(b);
+
+    // both places with Code sessions: the packaged app's is used, the other left as it is
+    fs.cpSync(b.store, roaming, { recursive: true });
+    const other = JSON.stringify(hashTree(roaming));
+    out = tool(b, dir, []);
+    expect(out, appLine(b.store), "both places with Code sessions: the packaged app's data is used");
+    ok(JSON.stringify(hashTree(roaming)) === other, 'and every file in AppData\\Roaming\\Claude is as it was');
+    tool(b, dir, ['-Undo']);
+
+    // the packaged app's data folder without Code sessions: refused, though the other place has some
+    moveDir(sessions, sessions + '.aside');
+    const planBytes = fs.existsSync(b.plan) ? fs.readFileSync(b.plan) : null;
+    const runsBefore = manifests(dir).length;
+    out = tool(b, dir, []);
+    moveDir(sessions + '.aside', sessions);
+    expect(out, new RegExp(`^Could not find the Claude desktop app's data: the packaged app's data folder, ${esc(b.store)}, holds no claude-code-sessions folder, so the app has not run a session in its Code tab\\. ${esc(roaming)} holds the Code sessions of an unpackaged install, which this script does not use while the packaged app has a data folder of its own\\.$`), "the packaged app's data folder without Code sessions: the run stops, naming both folders");
+    ok(manifests(dir).length === runsBefore && (planBytes === null ? !fs.existsSync(b.plan) : fs.readFileSync(b.plan).equals(planBytes)) && JSON.stringify(hashTree(roaming)) === other, 'and writes nothing');
+    fs.rmSync(path.join(b.profile, 'AppData', 'Roaming'), { recursive: true, force: true });
+
+    // no data in either place
+    moveDir(packagesOf(b), packagesOf(b) + '.aside');
+    out = tool(b, dir, ['-DryRun']);
+    moveDir(packagesOf(b) + '.aside', packagesOf(b));
+    expect(out, /^Could not find the Claude desktop app's data: neither /, 'no data in either place: the run stops and says where it looked');
+  } finally {
+    if (fs.existsSync(packagesOf(b) + '.aside')) moveDir(packagesOf(b) + '.aside', packagesOf(b));
+    if (fs.existsSync(sessions + '.aside')) moveDir(sessions + '.aside', sessions);
+    if (!fs.existsSync(b.store) && fs.existsSync(roaming)) moveDir(roaming, b.store);
+    else fs.rmSync(path.join(b.profile, 'AppData', 'Roaming'), { recursive: true, force: true });
+    fs.writeFileSync(b.prefs, asBuilt);
+    if (gone && !fs.existsSync(gone.file)) fs.writeFileSync(gone.file, gone.bytes);
+  }
+  compareBox(b, 'every case put back, the sandbox is as it was built');
+  removeBox(b);
+};
+
+// a chat entry of the receiving account whose chat the source lists too and whose transcript is on
+// this computer, with its bytes, to be taken out and put back
+function removableEntry(b) {
+  const onDisk = new Set();
+  const projects = path.join(b.profile, '.claude', 'projects');
+  for (const d of fs.readdirSync(projects, { withFileTypes: true })) if (d.isDirectory()) for (const f of fs.readdirSync(path.join(projects, d.name))) if (/\.jsonl$/i.test(f)) onDisk.add(f.slice(0, -6));
+  const inSource = new Set();
+  for (const id of entryIds(b, SK)) { try { const e = readJson(path.join(b.entries(SK), id + '.json')); if (e.cliSessionId) inSource.add(e.cliSessionId); } catch { /* unreadable entry */ } }
+  for (const id of entryIds(b, RK).sort()) {
+    const file = path.join(b.entries(RK), id + '.json');
+    let e; try { e = readJson(file); } catch { continue; }
+    if (e.cliSessionId && inSource.has(e.cliSessionId) && onDisk.has(e.cliSessionId) && e.isArchived !== true) return { file, bytes: fs.readFileSync(file) };
+  }
+  return null;
+}
+
+// a chat of the receiving account in the same folder as its one twin in the source, a folder that
+// exists and holds the chat's only transcript, so that a run moves it back there once it is put
+// somewhere else
+function folderPair(b) {
+  const projects = path.join(b.profile, '.claude', 'projects');
+  const copies = new Map();
+  for (const d of fs.readdirSync(projects, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    for (const f of fs.readdirSync(path.join(projects, d.name))) if (/\.jsonl$/i.test(f)) { const id = f.slice(0, -6); if (!copies.has(id)) copies.set(id, []); copies.get(id).push(d.name); }
+  }
+  const current = e => (typeof e.cliSessionId === 'string' && e.cliSessionId) || (typeof e.unarchivedCliSessionId === 'string' && e.unarchivedCliSessionId) || null;
+  const twins = new Map();
+  for (const id of entryIds(b, SK)) {
+    let e; try { e = readJson(path.join(b.entries(SK), id + '.json')); } catch { continue; }
+    const t = current(e); if (!t) continue;
+    if (!twins.has(t)) twins.set(t, []);
+    twins.get(t).push(e);
+  }
+  for (const id of entryIds(b, RK).sort()) {
+    const file = path.join(b.entries(RK), id + '.json');
+    let e; try { e = readJson(file); } catch { continue; }
+    const t = current(e);
+    if (!t || e.worktreePath) continue;
+    const ts = twins.get(t);
+    if (!ts || ts.length !== 1) continue;
+    const cwd = ts[0].cwd, origin = ts[0].originCwd || ts[0].cwd;
+    if (typeof cwd !== 'string' || !cwd || e.cwd !== cwd || e.originCwd !== origin) continue;
+    let isDir = false; try { isDir = fs.statSync(cwd).isDirectory(); } catch { /* gone */ }
+    const held = copies.get(t) || [];
+    if (isDir && held.length === 1 && held[0].toLowerCase() === appFolderName(cwd).toLowerCase()) return { file, cwd };
+  }
+  return null;
+}
+
+pass['app-running'] = () => {
+  const dir = toolCopy('app-running');
+  const b = newBox('srp-app-running', recvAcct);
+  setConfig(dir, srcAcct, 0);
+  // a run that moved one chat: its backup of the chat entry, as the tool writes one
+  const entry = path.join(b.entries(RK), entryIds(b, RK).sort()[0] + '.json');
+  const stamp = runStamp(new Date());
+  const run = path.join(b.data, 'backups', stamp);
+  fs.mkdirSync(path.join(run, 'entries'), { recursive: true });
+  fs.copyFileSync(entry, path.join(run, 'entries', path.basename(entry)));
+  fs.writeFileSync(path.join(run, 'backup.json'), JSON.stringify({ entries: [{ path: entry, copy: path.basename(entry), sha256: sha(entry) }] }, null, 2));
+  let standin = startStandin(b);
+  try {
+    ok(alive(standin.pid), `control: a stand-in for the app's program runs from the sandbox's AppData\\Local\\AnthropicClaude (process ${standin.pid})`);
+    const out = tool(b, dir, ['-Undo']);
+    expect(out, /^Claude is still running \(1 of its processes are running\)\. Quit it fully, including from the system tray, then run -Undo again\. Nothing was changed\.$/, 'while it runs, -Undo of a run that moved chats refuses, naming one process');
+    ok(fs.existsSync(path.join(run, 'backup.json')), "and leaves the run's backup in place");
+  } finally { ok(stopStandin(standin), 'the stand-in is stopped'); }
+  let out = tool(b, dir, ['-Undo']);
+  expect(out, new RegExp(`^Put back every file run ${stamp} changed`), 'once it has stopped, -Undo takes the run back');
+  ok(!fs.existsSync(run), "and retires the run's backup");
+
+  const pair = folderPair(b);
+  if (!pair) skip("a run leaving a chat's folder alone while the app runs", 'no chat here is in the same folder as its one twin, in a folder holding its only transcript');
+  else {
+    const bytes = fs.readFileSync(pair.file);
+    const e = JSON.parse(bytes.toString('utf8'));
+    e.cwd = b.sandbox; e.originCwd = b.sandbox;
+    fs.writeFileSync(pair.file, JSON.stringify(e));
+    const staged = fs.readFileSync(pair.file);
+    standin = startStandin(b);
+    try {
+      out = tool(b, dir, []);
+      expect(out, /^Folders: not changed, because Claude is still running \(1 of its processes are running\)\. Quit it fully, including from the system tray, and run this script again to move those chats\.$/, "while the stand-in runs, a run leaves a chat's folder alone and says why");
+      ok(fs.readFileSync(pair.file).equals(staged), 'and the chat entry is as it was');
+    } finally { ok(stopStandin(standin), 'the stand-in is stopped'); }
+    out = tool(b, dir, []);
+    expect(out, /^Folders: moved 1 chat\(s\)\.$/, "once it has stopped, the run moves the chat to its twin's folder");
+    ok(readJson(pair.file).cwd === pair.cwd, 'and the entry names that folder');
+    fs.writeFileSync(pair.file, bytes);
+  }
+  compareBox(b, 'the sandbox is as it was built');
+  removeBox(b);
+};
+
+pass.explorer = () => {
+  const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const q = s => s.replace(/'/g, "''");
+  const lower = s => String(s || '').toLowerCase();
+  const waitFor = (file, seconds) => { for (let k = 0; k < seconds * 10 && !fs.existsSync(file); k++) sleep(100); return fs.existsSync(file); };
+  // opens a shortcut to powershell.exe with these arguments through Explorer, as a double-click
+  // in Explorer does, its window minimized
+  function viaExplorer(name, args) {
+    const lnk = path.join(work, name + '.lnk'), maker = path.join(work, name + '-shortcut.ps1');
+    fs.writeFileSync(maker, ['$shell = New-Object -ComObject WScript.Shell', `$link = $shell.CreateShortcut('${q(lnk)}')`, `$link.TargetPath = '${q(psExe)}'`,
+      `$link.Arguments = '${q(args)}'`, `$link.WorkingDirectory = '${q(work)}'`, '$link.WindowStyle = 7', '$link.Save()'].join('\r\n'), 'ascii');
+    const made = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', maker], { encoding: 'utf8' });
+    if (made.status !== 0 || !fs.existsSync(lnk)) throw new Error('the shortcut could not be made: ' + (made.stderr || '').trim());
+    spawnSync('explorer.exe', [lnk]);
+  }
+  // this computer's processes, by a query of this pass's own
+  const table = () => JSON.parse(spawnSync('powershell.exe', ['-NoProfile', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, SessionId, Name, ExecutablePath, CommandLine | ConvertTo-Json -Compress'], { encoding: 'utf8', maxBuffer: 64 << 20 }).stdout);
+  // whether a process runs elevated: 1, 0, or -1 when it cannot be read
+  function elevationOf(pid) {
+    const file = path.join(work, 'elevation.ps1');
+    fs.writeFileSync(file, ['Add-Type -TypeDefinition @"', 'using System; using System.Runtime.InteropServices;', 'public static class ProveElevation {',
+      '  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool i, int p);', '  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+      '  [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr p, uint a, out IntPtr t);', '  [DllImport("advapi32.dll")] static extern bool GetTokenInformation(IntPtr t, int c, out int v, int l, out int r);',
+      '  public static int Of(int pid) { IntPtr p = OpenProcess(0x1000, false, pid); if (p == IntPtr.Zero) return -1; try { IntPtr t; if (!OpenProcessToken(p, 8, out t)) return -1; try { int v, r; return GetTokenInformation(t, 20, out v, 4, out r) ? v : -1; } finally { CloseHandle(t); } } finally { CloseHandle(p); } }',
+      '}', '"@', `[ProveElevation]::Of(${pid})`].join('\r\n'), 'ascii');
+    return Number(spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8' }).stdout.trim());
+  }
+  const dir = toolCopy('explorer');
+
+  // what a console started by Explorer sees of the app's processes
+  const pkg = JSON.parse(spawnSync('powershell.exe', ['-NoProfile', '-Command', "$p = Get-AppxPackage -Name Claude | Select-Object -First 1; if ($p) { @{ family = $p.PackageFamilyName; install = $p.InstallLocation } | ConvertTo-Json -Compress } else { 'null' }"], { encoding: 'utf8' }).stdout.trim() || 'null');
+  if (!pkg) skip('what a console started by Explorer sees of the app', 'the packaged app is not installed');
+  else {
+    const probe = path.join(work, 'explorer-probe.ps1');
+    fs.writeFileSync(probe, ['param([string]$Lib, [string]$Family, [string]$Out)', "$ErrorActionPreference = 'Stop'", '. $Lib',
+      '$found = Get-AppProcesses (Get-AppProgramRoots @($Family) $null)', "$level = (whoami /groups | Select-String 'Mandatory Label' | Out-String).Trim()",
+      '$record = @{ ids = @($found | ForEach-Object { $_.Id }); level = $level }', '[System.IO.File]::WriteAllText($Out, ($record | ConvertTo-Json -Compress))'].join('\r\n'), 'ascii');
+    const probeRun = (lib, name) => {
+      const out = path.join(work, name + '.json');
+      viaExplorer(name, `-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "${probe}" -Lib "${lib}" -Family "${pkg.family}" -Out "${out}"`);
+      if (!waitFor(out, 60)) return null;
+      sleep(300);
+      const r = readJson(out);
+      r.ids = [].concat(r.ids || []);
+      return r;
+    };
+    const t = table();
+    const prefix = lower(pkg.install.replace(/\\+$/, '') + '\\');
+    const app = t.filter(x => lower(x.ExecutablePath).startsWith(prefix));
+    const main = app.filter(x => /^claude\.exe$/i.test(x.Name) && !/--type=/.test(x.CommandLine || '') && app.some(c => c.ParentProcessId === x.ProcessId));
+    if (main.length === 0) skip('what a console started by Explorer sees of the app', 'the app is not running, or its processes cannot be read from here');
+    else {
+      const got = probeRun(path.join(dir, 'lib', 'DesktopApp.ps1'), 'explorer-probe');
+      if (!got) ok(false, 'a console started by Explorer runs the probe', 'no output within 60 s');
+      else if (!/Medium Mandatory Level/.test(got.level)) skip('what a console at Medium integrity sees of the app', 'a console started by Explorer does not run at Medium here');
+      else {
+        ok(main.every(mp => got.ids.includes(mp.ProcessId)), `a console started by Explorer, at Medium integrity, finds the app's main process (${main.map(mp => mp.ProcessId).join(', ')}) among the ${got.ids.length} it finds`);
+        if (elevationOf(main[0].ProcessId) !== 1) skip('a fault reading the programs with Process.Path', 'the app does not run elevated here, so Process.Path sees it from Medium too');
+        else {
+          const faulty = path.join(work, 'tool-explorer-fault');
+          fs.mkdirSync(path.join(faulty, 'lib'), { recursive: true });
+          for (const n of fs.readdirSync(path.join(dir, 'lib'))) fs.copyFileSync(path.join(dir, 'lib', n), path.join(faulty, 'lib', n));
+          const file = path.join(faulty, 'lib', 'DesktopApp.ps1'), text = fs.readFileSync(file, 'utf8');
+          const from = '    if ($limited) { $program = [SessionRestore.ProgramPath]::Of($process.Id) }\n';
+          if (text.split(from).length - 1 !== 1) ok(false, 'a fault reading the programs with Process.Path: its anchor is not in lib\\DesktopApp.ps1 exactly once; this case must be brought up to date with it');
+          else {
+            fs.writeFileSync(file, text.replace(from, () => '    if ($false) { }\n'));
+            const bad = probeRun(file, 'explorer-probe-fault');
+            ok(!!bad && !main.some(mp => bad.ids.includes(mp.ProcessId)), "with the programs read by Process.Path instead, such a console misses the app's main process, as it must, since the app runs elevated");
+          }
+        }
+      }
+    }
+  }
+
+  // a run started the way "Run with PowerShell" starts one runs again in its window, with -NoExit
+  const b = newBox('srp-explorer', recvAcct);
+  setConfig(dir, srcAcct, 0);
+  const scriptPath = path.join(dir, 'session-restore.ps1');
+  const runWith = (extra, file) => `${extra}"-Command" "if((Get-ExecutionPolicy ) -ne 'AllSigned') { Set-ExecutionPolicy -Scope Process Bypass }; & '${scriptPath}' -ExportTo '${file}' -UserProfile '${b.profile}'"`;
+  const exportFile = path.join(b.sandbox, 'explorer-export.json');
+  viaExplorer('run-with-powershell', runWith('', exportFile));
+  const exported = waitFor(exportFile, 120);
+  ok(exported, 'started the way "Run with PowerShell" starts it, through Explorer, the script does what its switches say (an export)');
+  sleep(3000);
+  let t2 = table();
+  const original = t2.find(x => /^powershell\.exe$/i.test(x.Name) && lower(x.CommandLine).includes("& '" + lower(scriptPath) + "'"));
+  const again = original && t2.find(x => /^powershell\.exe$/i.test(x.Name) && x.ParentProcessId === original.ProcessId && /-noexit/i.test(x.CommandLine || '') && lower(x.CommandLine).includes(lower(scriptPath)));
+  const starter = original && t2.find(x => x.ProcessId === original.ParentProcessId);
+  ok(!!starter && /^explorer\.exe$/i.test(starter.Name), 'that PowerShell was started by Explorer');
+  ok(!!again, 'the script ran itself again in that window, with -NoExit' + (again ? ` (process ${again.ProcessId})` : ''));
+  if (again) {
+    ok(/-ExportTo/.test(again.CommandLine) && lower(again.CommandLine).includes(lower(exportFile)) && lower(again.CommandLine).includes(lower(b.profile)), 'passing on its switches');
+    ok(alive(again.ProcessId) && alive(original.ProcessId), 'three seconds after the export, the window is still open');
+  }
+  if (exported) checker('verify-list.js on that export', [instrument('verify-list.js'), b.profile, RK, '--file', exportFile]);
+  for (const p of [again, original]) if (p && alive(p.ProcessId)) process.kill(p.ProcessId);
+  // -NoExit given: the script does not run again
+  const exportFile2 = path.join(b.sandbox, 'explorer-export-noexit.json');
+  viaExplorer('run-with-noexit', runWith('"-NoExit" ', exportFile2));
+  ok(waitFor(exportFile2, 120), 'started that way with -NoExit, the script runs');
+  sleep(3000);
+  t2 = table();
+  const kept = t2.find(x => /^powershell\.exe$/i.test(x.Name) && lower(x.CommandLine).includes(lower(exportFile2)) && /"-noexit" "-command"/i.test(x.CommandLine || ''));
+  const twice = kept && t2.find(x => x.ParentProcessId === kept.ProcessId && /^powershell\.exe$/i.test(x.Name));
+  ok(!!kept && !twice, 'and does not run itself again, since its window stays open anyway');
+  for (const p of [twice, kept]) if (p && alive(p.ProcessId)) process.kill(p.ProcessId);
   removeBox(b);
 };
 

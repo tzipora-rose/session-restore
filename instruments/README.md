@@ -78,22 +78,46 @@ before trusting it.
 
 - `prove-tool.js` — the proof of a build of the tool, in named passes: `static` (the `.ps1`
   files parse in Windows PowerShell 5.1 and are ASCII; the shared reads and
-  `lib\Transcripts.ps1`), `run` (a run, its entries and plan, the calls forward with one left
-  unmade, and back, `-Undo`), `calls`, `source-by-id`, `source-from-settings`,
-  `source-from-list`, `as-source`, `config`, `list`, `export-import`, `sections` and
-  `left-alone`. Each pass builds its sandboxes from this computer's data and removes them, runs
+  `lib\Transcripts.ps1`), `desktop-app` (`check-desktop-app.js` and the faults it must catch),
+  `run` (a run, its entries and plan, what it says of the transcripts it found, the calls
+  forward with one left unmade, and back, `-Undo`), `calls`, `source-by-id`,
+  `source-from-settings`, `source-from-list`, `as-source`, `config`, `list`, `export-import`,
+  `sections`, `left-alone`, `unpackaged` (the app's data where an unpackaged install keeps it,
+  in `AppData\Roaming\Claude`: a run there, its entries, plan and calls, `-Undo`; a package
+  folder holding no data folder; both places with Code sessions; the packaged app's data
+  without Code sessions; no data at all) and `app-running` (a stand-in for the app's program,
+  a copy of `ping.exe` running from the sandbox's `AppData\Local\AnthropicClaude`, makes `-Undo`
+  of a run that moved chats refuse and a run leave a chat's folder alone, each going ahead once
+  it stops). Each pass builds its sandboxes from this computer's data and removes them, runs
   its own scratch copy of the tool, reads what it expects (group names, labels, the sections)
   from the sandbox's data, and has `make-faults.js` make the faults the checkers and
-  `check-sidebar-calls.js` must catch. `--pass <names>` runs some; `--keep` keeps the work
-  folder, which is kept anyway when something is wrong. PROOF INCOMPLETE names what this data could not test. It
-  needs Node and Windows PowerShell 5.1, and accounts with groups and pins; its header says what
-  each pass stages. Made 2026-10-08 from the drivers of that day's proofs.
+  `check-sidebar-calls.js` must catch. One more pass, `explorer`, runs only when named
+  (`--pass explorer`), because it opens minimized windows on the desktop through Explorer for a
+  few seconds each: what a console started by Explorer, at Medium integrity, sees of the app's
+  processes (its main process, which a fault reading programs with `Process.Path` must miss
+  when the app runs elevated); a run started the way "Run with PowerShell" starts one runs again
+  in its window with `-NoExit` and its switches, and not when `-NoExit` is given. `--pass
+  <names>` runs some; `--keep` keeps the work folder, which is kept anyway when something is
+  wrong. PROOF INCOMPLETE names what this data could not test. It needs Node and Windows
+  PowerShell 5.1, and accounts with groups and pins; its header says what each pass stages.
+  Made 2026-10-08 from the drivers of that day's proofs; the last four passes added 2026-10-09.
+- `check-desktop-app.js` — checks `lib\DesktopApp.ps1` of a given tool folder by running its
+  functions in Windows PowerShell: where the app keeps its data, on profiles it builds for each
+  layout; whether the script was started to run and end, on command lines written by hand
+  ("Run with PowerShell" as Windows writes it, a PowerShell window opened from the Start menu,
+  `-NoExit` in each of its forms); the parent process's name; and the app's processes: a
+  stand-in program running from an unpackaged install's folder, then stopped; a held `LOCK`
+  file, then let go; and, when the packaged app is installed and running, its main process
+  counted and its background service, which runs in another Windows session, not. That last
+  part needs a process that can read the app's processes, so from a console that is not
+  elevated while the app is, it reports it as not tested. `node check-desktop-app.js <tool folder>`.
 - `stage-sandbox.js` — stages states in a sandbox for `prove-tool.js`, or by hand: an account's
   groups and pins taken out, a group with no chat, a chat filed, pinned or made newer than a
   plan, a list without pins, the scratch config naming an account by its email or its id. It
   writes nothing outside the sandboxes' folder. Its header lists the commands.
 - `make-faults.js` — makes one fault at a time in a checker's input (a plan, a list or export,
-  the settings file, a chat entry) or in a throwaway copy of the script, and checks that it is
+  the settings file, a chat entry) or in a throwaway copy of the script or of
+  `lib\DesktopApp.ps1`, and checks that it is
   caught by exactly the check meant for it, or that the result stays clean where the app makes
   such a change itself. A fault runs only beside its undamaged input passing, and one this data
   cannot stage is reported as not tested. Used by `prove-tool.js`; its header lists the modes.
@@ -242,6 +266,19 @@ before trusting it.
   web interface is rebuilt often: after a change to the sidebar, read its function that
   reconciles the sections with the groups again (`webui-cache\scan-cache.js`, needle
   `kind:"manual"`) before trusting either.
+- **A sandbox's package folder is named `Claude_sandbox`**, which no installed package has, so
+  the tool's test of whether the app is running never sees the real app in a sandbox run: it
+  looks for programs in the sandbox's own folders. That is why `app-running` runs a stand-in
+  program from one of them. The checkers read a sandbox's data where `new-sandbox.ps1` built it,
+  under the package folder; `unpackaged` moves it to `AppData\Roaming\Claude` for the tool's runs
+  and back for the checkers, translating the paths the tool wrote.
+- **When the desktop app runs elevated (with administrator rights), a console started from
+  Explorer does not: it runs at Medium integrity.** From such a console, `Process.Path` reads
+  only the app's sandboxed helper processes, never its main one; `QueryFullProcessImageName`
+  reads them all. A test of how the tool sees the app from a console has to run at Medium: a
+  shortcut to `powershell.exe` opened with `explorer.exe` from an elevated process runs at
+  Medium (the `explorer` pass does this), while `runas /trustlevel:0x20000` gives a process that
+  is not elevated but still at High integrity. Found 2026-10-09.
 - **A file a Claude session's shell creates under `AppData` is stored in the app's package
   folder**, because the desktop app is a packaged app; a console outside the app does not see it
   at the path asked for. So anything both a console run and a session's run must find is kept

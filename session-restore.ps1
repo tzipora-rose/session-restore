@@ -4,9 +4,11 @@
   another account's.
 
   WHY THIS EXISTS
-  The Claude desktop app is MSIX/Store-packaged, so its data lives under
-  AppData\Local\Packages\Claude_<suffix>\LocalCache\Roaming\Claude\ (a normal console cannot
-  follow the AppData\Roaming\Claude alias). The sidebar lists only the sessions that have an
+  The Claude desktop app keeps its data in
+  AppData\Local\Packages\Claude_<suffix>\LocalCache\Roaming\Claude\ when it is the packaged
+  (MSIX) app (a console outside the app cannot follow the AppData\Roaming\Claude alias), and in
+  AppData\Roaming\Claude\ itself when it is an unpackaged (Squirrel) install, or a packaged app
+  installed over one (lib\DesktopApp.ps1). The sidebar lists only the sessions that have an
   index entry under the CURRENTLY signed-in account's folder, and shows only that account's
   custom groups and pins. Conversations that are old, were opened under another account, or
   grew too long to scroll up in still exist on disk as transcripts, but if they have no index
@@ -24,7 +26,7 @@
   itself: the app does, through its own sidebar tools, called by a Claude session in the app.
   -Sidebar lists the calls that are left.
 
-  It auto-detects the package path, the current account and its org, and learns which email
+  It finds the app's data folder, the current account and its org, and learns which email
   belongs to which account from Claude Code's own account files - no hardcoded IDs.
 
   USAGE (run from this folder; each line is a single command):
@@ -46,6 +48,10 @@
     Import such a file: plans that the signed-in account's groups and pins become the file's,
     for a Claude session to apply with -Sidebar, as after a switch:
       .\session-restore.ps1 -Import <file>
+  Run it from an open PowerShell window. Started from Explorer instead ("Run with PowerShell" in
+  its menu, or a double-click where scripts run that way), it runs itself again in the same
+  window with -NoExit, so that the window stays open when it ends. Such a start passes no
+  switch, so it is a real run, not a preview.
 
   THE TWO STEPS OF A SWITCH: sign in to the account that should receive the chats, fully quit
   Claude (including from the system tray) and run the script: it creates the entries, sets the
@@ -94,6 +100,25 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\JsJson.ps1')
 . (Join-Path $PSScriptRoot 'lib\ChromiumLocalStorage.ps1')
 . (Join-Path $PSScriptRoot 'lib\Transcripts.ps1')
+. (Join-Path $PSScriptRoot 'lib\DesktopApp.ps1')
+
+# Started from Explorer, the window would close the moment the script ends, before what it said
+# can be read. So it runs itself again in this window with -NoExit, which keeps the window open
+# however the script ends. The test needs both parts: a PowerShell window opened from the Start
+# menu also has Explorer as its parent, and a script typed into it runs in that same process, but
+# that process's command line names no script.
+if ((Test-LaunchedForScript ([Environment]::CommandLine) (Split-Path -Leaf $PSCommandPath)) -and ((Get-ParentProcessName) -eq 'explorer')) {
+  $again = New-Object System.Collections.Generic.List[string]
+  foreach ($word in @('-NoProfile', '-NoExit', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)) { $again.Add($word) }
+  foreach ($name in @($PSBoundParameters.Keys)) {
+    $value = $PSBoundParameters[$name]
+    if ($value -is [System.Management.Automation.SwitchParameter]) { if ($value.IsPresent) { $again.Add('-' + $name) } }
+    else { $again.Add('-' + $name); $again.Add([string]$value) }
+  }
+  Write-Host 'Started from Explorer: the script runs again in this window, which stays open when it ends. Close the window once you have read what it says.'
+  & (Join-Path $PSHOME 'powershell.exe') $again.ToArray()
+  return
+}
 
 $scriptDir      = $PSScriptRoot
 $legacyManifest = Join-Path $scriptDir 'created-entries.txt'
@@ -375,29 +400,6 @@ function Select-TranscriptCopy($Copies, $FolderByProject) {
   @($Copies | Sort-Object @{ Expression = { $FolderByProject.ContainsKey($_.Directory.Name) }; Descending = $true },
                           @{ Expression = { $_.Length }; Descending = $true },
                           @{ Expression = { $_.Directory.Name } })[0]
-}
-
-function Get-AppActivity([string]$PackageFamily, [string[]]$StorageDirs) {
-  $reasons = New-Object System.Collections.Generic.List[string]
-  $package = $null
-  try { $package = Get-AppxPackage -ErrorAction Stop | Where-Object { $_.PackageFamilyName -eq $PackageFamily } | Select-Object -First 1 } catch { }
-  if ($package -and $package.InstallLocation) {
-    $root = $package.InstallLocation.TrimEnd('\') + '\'
-    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $path = $null
-        try { $path = $_.Path } catch { }
-        $path -and $path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)
-      })
-    if ($running.Count -gt 0) { $reasons.Add(('{0} of its processes are running' -f $running.Count)) }
-  }
-  foreach ($dir in $StorageDirs) {
-    $lock = Join-Path $dir 'LOCK'
-    if (Test-Path -LiteralPath $lock) {
-      try { $handle = [System.IO.File]::Open($lock, 'Open', 'ReadWrite', 'None'); $handle.Dispose() }
-      catch { $reasons.Add(('its storage folder {0} is in use' -f (Split-Path -Leaf (Split-Path -Parent $lock)))) }
-    }
-  }
-  , $reasons.ToArray()
 }
 
 function Get-Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
@@ -916,16 +918,17 @@ $sidebarLegend = @(
   '  delete_group: its chats are already out of it by then; deleting a group never deletes a chat.'
 )
 
-# --- locate the packaged app store (derive the package suffix; never hardcode it) ---
-$packageFolder = Get-ChildItem (Join-Path $UserProfile 'AppData\Local\Packages') -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue |
-  Where-Object { Test-Path (Join-Path $_.FullName 'LocalCache\Roaming\Claude\claude-code-sessions') } |
-  Select-Object -First 1
-if (-not $packageFolder) { Write-Host 'Could not locate the Claude package store (AppData\Local\Packages\Claude_*\LocalCache\Roaming\Claude). Is the desktop app installed?'; return }
-$pkgRoot      = Join-Path $packageFolder.FullName 'LocalCache\Roaming\Claude'
-$sessionsRoot = Join-Path $pkgRoot 'claude-code-sessions'
-$configPath   = Join-Path $pkgRoot 'config.json'
-$prefsPath    = Join-Path $pkgRoot 'claude_desktop_config.json'
-$leveldbDir   = Join-Path $pkgRoot 'Local Storage\leveldb'
+# --- the app's data folder, found as the app finds it (derived; the package suffix is never
+# hardcoded) ---
+$appData = Find-AppData $UserProfile
+if (-not $appData.Root) { Write-Host ("Could not find the Claude desktop app's data: " + $appData.Problem); return }
+Write-Host "App data: $($appData.Root)"
+$appRoot      = $appData.Root
+$sessionsRoot = Join-Path $appRoot 'claude-code-sessions'
+$configPath   = Join-Path $appRoot 'config.json'
+$prefsPath    = Join-Path $appRoot 'claude_desktop_config.json'
+$leveldbDir   = Join-Path $appRoot 'Local Storage\leveldb'
+$unpackagedInstall = Join-Path $UserProfile 'AppData\Local\AnthropicClaude'
 
 $userConfig = Get-UserConfig
 
@@ -1230,7 +1233,7 @@ if ($Undo) {
   if ($runBackup) {
     $record = ConvertFrom-JsJson (Read-TextFile (Join-Path $runBackup 'backup.json'))
     if (@(Get-JsList $record 'entries').Count -gt 0) {
-      $activity = Get-AppActivity $packageFolder.Name @($leveldbDir)
+      $activity = Get-AppActivity (Get-AppProgramRoots $appData.PackageFamilies $unpackagedInstall) @($leveldbDir)
       if ($activity.Count -gt 0) { Write-Host ("Claude is still running ({0}). Quit it fully, including from the system tray, then run -Undo again. Nothing was changed." -f ($activity -join '; ')); return }
     }
     Restore-RunFiles $runBackup
@@ -1303,6 +1306,7 @@ $dateTally = @{ twin = 0; record = 0; file = 0 }
 $folderTally = @{ twin = 0; stored = 0; record = 0; root = 0 }
 $twinTally = @{ archived = 0; lineage = 0 }
 $skippedParts = 0
+$listedHere = 0
 $copyWarnings = New-Object System.Collections.Generic.List[string]
 $samples = New-Object System.Collections.Generic.List[string]
 
@@ -1335,7 +1339,7 @@ function Get-TranscriptModel([string]$path) {
 }
 
 foreach ($cli in (@($copiesById.Keys) | Sort-Object)) {
-  if ($have.Contains($cli)) { continue }
+  if ($have.Contains($cli)) { $listedHere++; continue }
   if ($partOf.ContainsKey($cli)) { $skippedParts++; continue }
   try {
     $copies = $copiesById[$cli]
@@ -1474,6 +1478,7 @@ $datesLine = "  dates: {0} from the same chat's entry in another account, {1} fr
 $foldersLine = "  folders: {0} from the same chat's entry in another account, {1} from where the transcript is stored, {2} from the transcript's records, {3} the drive root" -f $folderTally.twin, $folderTally.stored, $folderTally.record, $folderTally.root
 $twinLine = "  as in the same chat's entry in another account: {0} archived, {1} carrying their earlier transcripts" -f $twinTally.archived, $twinTally.lineage
 
+Write-Host ("Transcripts on this computer: {0}. Already listed in this account: {1}. Earlier parts of another chat, never listed on their own: {2}. Not listed in this account: {3}." -f $copiesById.Count, $listedHere, $skippedParts, ($copiesById.Count - $listedHere - $skippedParts))
 if ($DryRun) {
   $tot = $tally.twin + $tally.custom + $tally.ai + $tally.user + $tally.date
   Write-Host ("DRY RUN - nothing written. Would create {0} entries:" -f $tot)
@@ -1501,7 +1506,6 @@ if ($DryRun) {
   }
   Write-Host ("Org dir now has {0} entries." -f (Get-ChildItem -LiteralPath $orgDir -Filter *.json -File).Count)
 }
-if ($skippedParts -gt 0) { Write-Host ("Left out: {0} transcript(s) that an entry keeps as another part of its chat." -f $skippedParts) }
 foreach ($warning in $copyWarnings) { Write-Host $warning }
 
 # --- groups, pins and folders: work out how this account's become an exact copy of the
@@ -1725,7 +1729,7 @@ if (-not $userConfig.CopyGroupsFrom) {
       foreach ($s in $folderSkips) { Write-Host "  $s" }
     }
     if ($folderEdits.Count -gt 0 -and -not $DryRun) {
-      $activity = Get-AppActivity $packageFolder.Name @($leveldbDir)
+      $activity = Get-AppActivity (Get-AppProgramRoots $appData.PackageFamilies $unpackagedInstall) @($leveldbDir)
       if ($activity.Count -gt 0) {
         Write-Host ("Folders: not changed, because Claude is still running ({0}). Quit it fully, including from the system tray, and run this script again to move those chats." -f ($activity -join '; '))
       } else {
