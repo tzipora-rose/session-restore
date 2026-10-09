@@ -49,8 +49,9 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const stage = require('./stage-sandbox.js');
 const faults = require('./make-faults.js');
-// Windows PowerShell 5.1 started with PowerShell 7's PSModulePath cannot load its own modules
-// (new-sandbox.ps1 then finds no Get-FileHash); without the variable it builds its own path.
+// Windows PowerShell 5.1 started with PowerShell 7's PSModulePath finds 7's copies of the modules
+// both have before its own and loses commands such as Get-FileHash, which new-sandbox.ps1 needs;
+// without the variable it builds its own path.
 for (const k of Object.keys(process.env)) if (/^psmodulepath$/i.test(k)) delete process.env[k];
 
 const here = __dirname;

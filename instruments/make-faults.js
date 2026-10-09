@@ -301,8 +301,9 @@ function run(mode, args) {
 module.exports = { run };
 
 if (require.main === module) {
-  // Windows PowerShell 5.1 started with PowerShell 7's PSModulePath cannot load its own modules;
-  // without the variable it builds its own path
+  // Windows PowerShell 5.1 started with PowerShell 7's PSModulePath finds 7's copies of the modules
+  // both have before its own and loses commands such as Get-FileHash; without the variable it
+  // builds its own path
   for (const k of Object.keys(process.env)) if (/^psmodulepath$/i.test(k)) delete process.env[k];
   const [mode, ...args] = process.argv.slice(2);
   if (!mode) { console.error('usage: node make-faults.js <mode> ... (see the header of this file)'); process.exit(2); }

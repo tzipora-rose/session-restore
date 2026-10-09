@@ -272,12 +272,15 @@ before trusting it.
   `ArrayList` are fine. Make such a list with `::new()`, or turn it into an array with
   `.ToArray()` first. And an empty array returned from `$(...)` becomes nothing: assign it to a
   variable to keep it a list. Both met 2026-10-08; the first checked in both shells that day.
-- **Windows PowerShell 5.1 started with PowerShell 7's `PSModulePath` cannot load its own
-  modules**: a program run from PowerShell 7, such as Node, passes 7's module folders on to the
-  `powershell.exe` it starts, and 5.1 then finds no `Get-FileHash`, so `new-sandbox.ps1` fails.
+- **Windows PowerShell 5.1 started with PowerShell 7's `PSModulePath` loses some of its own
+  commands**: a program run from PowerShell 7, such as Node, passes 7's module folders, which come
+  first, on to the `powershell.exe` it starts, and 5.1 then finds 7's copy of each module both
+  have before its own. Of 17 commands tried, `Get-FileHash`, `Format-Hex`, `New-Guid`,
+  `New-TemporaryFile`, `Get-Acl` and `Find-Module` were not found, and `new-sandbox.ps1` fails
+  without `Get-FileHash`; the other 11, `Get-Date` and `Get-ChildItem` among them, were found.
   PowerShell 7 corrects the variable when it starts `powershell.exe` itself; Node does not.
   `prove-tool.js` and `make-faults.js` remove the variable before they start anything. Found
-  2026-10-08.
+  2026-10-08; its extent checked 2026-10-09.
 - **Git Bash converts doubled backslashes in arguments to native programs.** To search a transcript
   for a Windows path as JSON stores it (two backslashes), pass four; test any such search with a
   string known to be present first.
