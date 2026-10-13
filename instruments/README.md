@@ -74,6 +74,13 @@ that was seen, and what was read in the app's code instead. After an app update 
 the sidebar tools, try the tools on the real sidebar again, with one chat and a throwaway group,
 before trusting it.
 
+What `-Sidebar` tells a session to pass to the app's tools is checked by none of this. The
+stand-in makes the calls in the script's own form (`"group": null` for Ungrouped), and no
+instrument turns a listed call into the inputs of the app's tool, as a session does from the
+lines printed above the calls. A change to those lines is checked on the real app, by a session
+on its own sidebar entry: until 2026-10-13 they gave a form for the move to Ungrouped that the
+app's tool refused, and every pass was clean.
+
 ## The tools
 
 - `prove-tool.js` — the proof of a build of the tool, in named passes: `static` (the `.ps1`

@@ -913,7 +913,8 @@ function Save-SidebarCalls([string]$Run, [string]$Aim, $Records) {
 }
 
 $sidebarLegend = @(
-  '  "group" is a group''s name: pass the id list_groups gives for that name. null means Ungrouped (group_id null).',
+  '  "group" is a group''s name: pass the id list_groups gives for that name, as group_id.',
+  '  A "group" of null means Ungrouped: pass section_id "sessions" and leave group_id out. A null in group_id can reach the tool as the text "null", which it refuses.',
   '  create_group: skip it when list_groups already shows a group with exactly that name.',
   '  delete_group: its chats are already out of it by then; deleting a group never deletes a chat.'
 )

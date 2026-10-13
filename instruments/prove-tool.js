@@ -1022,6 +1022,11 @@ pass['app-running'] = () => {
     out = tool(b, dir, []);
     expect(out, /^Folders: moved 1 chat\(s\)\.$/, "once it has stopped, the run moves the chat to its twin's folder");
     ok(readJson(pair.file).cwd === pair.cwd, 'and the entry names that folder');
+    // both runs are taken back before the sandbox is compared with the build, the newest first:
+    // the second one's move, then the entries the first one created, which a run does for every
+    // chat the receiving account does not list
+    tool(b, dir, ['-Undo']);
+    for (let k = 0; k < 3 && manifests(dir).length; k++) tool(b, dir, ['-Undo']);
     fs.writeFileSync(pair.file, bytes);
   }
   compareBox(b, 'the sandbox is as it was built');

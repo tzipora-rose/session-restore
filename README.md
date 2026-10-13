@@ -196,8 +196,13 @@ Run `-Sidebar`. It prints the calls that are left, one per line, as a tool of
 - `create_group {"name": ...}` — call `list_groups` first and skip the call when a group of
   exactly that name is already there (a group that holds no chat yet is not visible to the
   script);
-- `move_sessions {"group": <name or null>, "session_ids": [...]}` — pass the group's id from
-  `list_groups` as `group_id`; `null` means `group_id` null, which is Ungrouped;
+- `move_sessions {"group": <name or null>, "session_ids": [...]}` — for a name, pass the
+  group's id from `list_groups` as `group_id`. A `"group"` of `null` means Ungrouped: pass
+  `section_id` `"sessions"` and leave `group_id` out. The tool's description also offers a
+  `group_id` of null for Ungrouped, but a null a session puts there can reach the tool as the
+  text `"null"`, which it takes for a group's id and refuses ("No custom group with that id");
+  and it refuses a call whose `group_id` and `section_id` differ. A refused call changes
+  nothing;
 - `delete_group {"group": <name>}` — by then its chats are out of it; deleting a group never
   deletes a chat;
 - `set_pinned {"session_id": ..., "pinned": true|false}`.
@@ -533,6 +538,19 @@ The plan and the calls were checked on 2026-10-08, on copied profiles, against t
   that the test instruments run (the plan, the calls and their cases, the saved list, export and
   import, the reads) passed again on this build; the two tried once on the real app (the
   sidebar tools themselves, and where the tool's own files land) were not repeated.
+- **The move to Ungrouped** (2026-10-13, desktop app 2.31226.1.0). `-Sidebar` and this README
+  had said to move a chat to Ungrouped by passing a `group_id` of null, a call the first try
+  of the tools on the real sidebar never made. A session applying a plan that way was refused:
+  the null had reached the tool as the text "null". The app's code, the same in this version
+  as in 2.26454.2.0, takes `section_id` "sessions" as Ungrouped, takes any text in `group_id`
+  for a group's id, and refuses a call whose `group_id` and `section_id` differ. A session
+  then made each call on its own sidebar entry: a `group_id` of null was refused and changed
+  nothing, the same with `section_id` "sessions" beside it was refused, and `section_id`
+  "sessions" alone moved the chat to Ungrouped. Both texts now give that form. The calls the
+  script lists and its calls file are as they were, and the checks the test instruments run
+  passed again on this build, after the pass for a running app was corrected to take back its
+  own runs before it compares the copied profile with its build: a run brings back every chat
+  the account does not list, and that day the account lacked some.
 
 The chat step as it is (earlier transcripts left out; title, model, effort, archived state
 and earlier transcripts taken from the twin; shared transcript reads) was checked on 2026-10-04
