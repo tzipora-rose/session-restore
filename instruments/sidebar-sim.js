@@ -1,3 +1,21 @@
+// Copyright (C) 2026 tzipora-rose
+//
+// This file is part of session-restore.
+//
+// session-restore is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License, version 3, as published by
+// the Free Software Foundation.
+//
+// session-restore is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+// more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with session-restore. If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Stands in for the Claude app's sidebar tools in a sandbox, which has no running app: it makes
 // the calls session-restore.ps1 -Sidebar listed, in the sandbox's copy of the app's settings
 // file, the way the app was seen to make them on 2026-10-08 (desktop app 2.26454.2.0):

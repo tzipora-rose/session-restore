@@ -1,3 +1,21 @@
+// Copyright (C) 2026 tzipora-rose
+//
+// This file is part of session-restore.
+//
+// session-restore is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License, version 3, as published by
+// the Free Software Foundation.
+//
+// session-restore is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+// more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with session-restore. If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Checks the sidebar plan a run of session-restore.ps1 saved, against the sandbox it was made in,
 // without any of the script's code: the plan must say that the receiving account's groups and
 // pins become the source account's, chat for chat, and must record the receiving account's own

@@ -1,3 +1,21 @@
+// Copyright (C) 2026 tzipora-rose
+//
+// This file is part of session-restore.
+//
+// session-restore is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License, version 3, as published by
+// the Free Software Foundation.
+//
+// session-restore is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+// more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with session-restore. If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Checks that Read-TranscriptHeadLines in a tool folder's lib\Transcripts.ps1 lets another process
 // keep writing to the transcript it reads, in Windows PowerShell 5.1, the shell the tool runs in:
 //   1. it reads a file that another process holds open for appending;
