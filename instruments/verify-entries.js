@@ -17,18 +17,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // Independent check of a sandbox run's chat entries (shares no code with the PowerShell script).
-// Usage: node verify-entries.js <sandbox profile dir> <run manifest> <receiving key> <source key> <sandbox fingerprints> [<backup run dir>]
-//   run manifest     the created-entries-<stamp>.txt the run wrote beside the script under test
+// Usage: node verify-entries.js <sandbox profile dir> <run manifest> <receiving key> <source key> <sandbox fingerprints> [<backup run dir>] [--app-running]
+//   run manifest     the created-entries-<stamp>.txt the run wrote beside the script under test,
+//                    or none for a run that created no entry
 //   keys             "<accountUuid>/<orgUuid>", as the script prints them; pass none/none as the
 //                    source key for a run that copied no groups, pins or folders (no account was
 //                    configured, or the configured one was the receiving one or could not be found)
-//   fingerprints     fingerprints-at-build.json in the sandbox folder (new-sandbox.ps1 writes it)
+//   fingerprints     fingerprints-at-build.json in the sandbox folder (new-sandbox.ps1 writes it),
+//                    or the fingerprints taken again after staging
 //   backup run dir   <profile>\.session-restore\backups\<stamp>, when the run wrote one
+//   --app-running    the run was made while the app counted as running, so it gave no link to an
+//                    entry the receiving account listed before it, and moved none to another folder
 // It checks: each chat the receiving account lacked got exactly one entry, and no transcript that
 // an entry keeps as another part of its chat got one; each new entry's dates and folder follow the
 // rules below; each new entry is what its twin is (title, model, effort, archived state, earlier
-// transcripts) and holds nothing else; each existing entry whose twin in the source account names
-// another folder was moved there unless a rule forbids it; and no other entry file changed.
+// transcripts, and the link below) and holds nothing else; each existing entry whose twin in the
+// source account names another folder was moved there unless a rule forbids it; no other entry
+// file changed; and each entry here is linked to another chat as the rules below say.
 // The rules: a new entry takes its dates and folder from the same chat's entry in another account
 // (the source account's first, else the most recently active), using the folder only when it
 // exists and holds the transcript; otherwise its folder is the one the transcript is stored for
@@ -39,12 +44,24 @@
 // preClearCliSessionId, rewindEdges and transcriptModelStates; with no twin, the model is the last
 // one its transcript logs (else claude-opus-4-8), the effort "high" and the titleSource "auto".
 // Every new entry is in the default permission mode.
+// Links: an entry here that had none of spawnedFrom, forkedFromSessionId and lineageDetached
+// before the run (every new entry) takes its twin's: spawnedFrom with its sessionId, and
+// forkedFromSessionId, each turned into the id of the receiving org's entry for the chat that id
+// names in the twin's org (the one not archived, else the archived one; none when two could be
+// meant), forkedAtMessageUuid and lineageDetached as they are; no link at all when an id names
+// no entry there, or an entry whose chat has no entry here, or this entry itself, or when the
+// twin's spawnedFrom is not an object or its forkedFromSessionId not a text. An entry that had a
+// link before the run keeps it as it was, and with --app-running so does every entry the
+// receiving org listed before the run.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const [profile, manifestPath, destKey, sourceKey, fingerprintsPath, backupDir] = process.argv.slice(2);
-if (!fingerprintsPath) { console.error('usage: node verify-entries.js <profile> <run manifest> <receiving key> <source key> <fingerprints> [<backup run dir>]'); process.exit(2); }
+const argv = process.argv.slice(2);
+const appRunning = argv.includes('--app-running');
+const [profile, manifestPath, destKey, sourceKey, fingerprintsPath, backupDirArg] = argv.filter(a => a !== '--app-running');
+const backupDir = backupDirArg || null;
+if (!fingerprintsPath) { console.error('usage: node verify-entries.js <profile> <run manifest|none> <receiving key> <source key> <fingerprints> [<backup run dir>] [--app-running]'); process.exit(2); }
 let fails = 0;
 const check = (ok, msg) => { console.log((ok ? '  ok   ' : '  FAIL ') + msg); if (!ok) fails++; };
 const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
@@ -120,7 +137,7 @@ const store = storeRoot(profile);
 const sessions = path.join(store, 'claude-code-sessions');
 const [destAccount, destOrg] = destKey.split('/');
 const [sourceAccount, sourceOrg] = sourceKey.split('/');
-const created = new Set(fs.readFileSync(manifestPath, 'utf8').split(/\r?\n/).filter(Boolean).map(p => path.resolve(p).toLowerCase()));
+const created = new Set(manifestPath === 'none' ? [] : fs.readFileSync(manifestPath, 'utf8').split(/\r?\n/).filter(Boolean).map(p => path.resolve(p).toLowerCase()));
 const backup = backupDir ? JSON.parse(fs.readFileSync(path.join(backupDir, 'backup.json'), 'utf8')) : { entries: [] };
 const backedUp = new Map(backup.entries.map(b => [path.resolve(b.path).toLowerCase(), path.join(backupDir, 'entries', b.copy)]));
 const entries = [];
@@ -173,6 +190,49 @@ function twinOf(id) {
   if (!pool.length) pool = others;
   pool.sort((p, q) => (isInt(q.e.lastActivityAt) ? q.e.lastActivityAt : 0) - (isInt(p.e.lastActivityAt) ? p.e.lastActivityAt : 0));
   return pool[0] || null;
+}
+// links: the fields that link a chat to another, and the link a twin gives an entry here
+const linkNames = ['spawnedFrom', 'forkedFromSessionId', 'forkedAtMessageUuid', 'lineageDetached'];
+const has = (o, k) => o !== null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+const isLinked = e => ['spawnedFrom', 'forkedFromSessionId', 'lineageDetached'].some(k => has(e, k));
+const linkOf = e => Object.fromEntries(linkNames.filter(k => has(e, k)).map(k => [k, e[k]]));
+const idOf = x => (x.e && typeof x.e.sessionId === 'string' && x.e.sessionId) ? x.e.sessionId : path.basename(x.file, '.json');
+// the receiving org's entry, after the run, for a chat's transcript
+function hereFor(t) {
+  const list = dest.filter(x => x.e && transcriptsOf(x.e).current === t);
+  const live = list.filter(x => x.e.isArchived !== true);
+  const pool = live.length ? live : list;
+  return pool.length === 1 ? idOf(pool[0]) : null;
+}
+function linkFor(twin, own) {
+  if (!twin || !isLinked(twin.e)) return { fields: null };
+  const resolve = id => {
+    if (typeof id !== 'string' || !id) return null;
+    const p = before.find(y => y.acct === twin.acct && y.org === twin.org && y.e && idOf(y) === id);
+    if (!p) return null;
+    const t = transcriptsOf(p.e).current;
+    if (!t) return null;
+    const here = hereFor(t);
+    return here && here !== own ? here : null;
+  };
+  const f = {};
+  if (has(twin.e, 'spawnedFrom')) {
+    const s = twin.e.spawnedFrom;
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return { problem: 'shape' };
+    const here = resolve(s.sessionId);
+    if (!here) return { problem: 'parent' };
+    f.spawnedFrom = { ...s, sessionId: here };
+  }
+  if (has(twin.e, 'forkedFromSessionId')) {
+    const k = twin.e.forkedFromSessionId;
+    if (typeof k !== 'string' || !k) return { problem: 'shape' };
+    const here = resolve(k);
+    if (!here) return { problem: 'parent' };
+    f.forkedFromSessionId = here;
+    if (has(twin.e, 'forkedAtMessageUuid')) f.forkedAtMessageUuid = twin.e.forkedAtMessageUuid;
+  }
+  if (has(twin.e, 'lineageDetached')) f.lineageDetached = twin.e.lineageDetached;
+  return { fields: f };
 }
 
 console.log('--- 1. each chat the receiving account lacked got exactly one entry');
@@ -264,7 +324,8 @@ for (const x of dest.filter(y => y.created)) {
   if (text(te.effort)) t3.efforts++;
   if (x.e.effort !== wantEffort) { wrongEffort++; say(x, 'effort', x.e.effort, wantEffort); }
   if (x.e.permissionMode !== 'default') { wrongMode++; say(x, 'permissionMode', x.e.permissionMode, 'default'); }
-  const wantKeys = [...baseKeys, ...lineageKeys.filter(k => Object.prototype.hasOwnProperty.call(te, k))].sort();
+  const lf = twin ? linkFor(twin, idOf(x)).fields : null;
+  const wantKeys = [...baseKeys, ...lineageKeys.filter(k => Object.prototype.hasOwnProperty.call(te, k)), ...(lf ? Object.keys(lf) : [])].sort();
   if (JSON.stringify(Object.keys(x.e).sort()) !== JSON.stringify(wantKeys)) { wrongKeys++; say(x, 'fields', Object.keys(x.e).sort(), wantKeys); }
   if (x.e.sessionId !== path.basename(x.file, '.json')) { wrongIds++; say(x, 'sessionId', x.e.sessionId, path.basename(x.file, '.json')); }
 }
@@ -295,17 +356,18 @@ for (const x of dest.filter(y => !y.created)) {
       }
     }
   }
+  if (appRunning) { wantCwd = was.cwd; wantOrigin = was.originCwd; }
   const now = x.e;
   if (now.cwd !== wantCwd || now.originCwd !== wantOrigin) { wrongMove++; console.log('       "' + was.title + '": ' + now.cwd + ' expected ' + wantCwd); }
   if (was.cwd !== now.cwd) moved++; else kept++;
   if (backedUp.has(key)) {
     const keys = new Set([...Object.keys(was), ...Object.keys(now)]);
     const diff = [...keys].filter(k => JSON.stringify(was[k]) !== JSON.stringify(now[k]));
-    if (diff.some(k => !['isStarred', 'cwd', 'originCwd'].includes(k))) { stray++; console.log('       ' + path.basename(x.file) + ' also differs in ' + JSON.stringify(diff)); }
+    if (diff.some(k => !['isStarred', 'cwd', 'originCwd', ...(isLinked(was) ? [] : linkNames)].includes(k))) { stray++; console.log('       ' + path.basename(x.file) + ' also differs in ' + JSON.stringify(diff)); }
   }
 }
 check(wrongMove === 0, `${moved} existing entries moved, ${kept} left where they were (${wrongMove} not where the rules put them)`);
-check(stray === 0, `each backed-up entry differs from its backup only in isStarred, cwd and originCwd (${stray} differ elsewhere)`);
+check(stray === 0, `each backed-up entry differs from its backup only in isStarred, cwd and originCwd, and in the link fields when it had no link (${stray} differ elsewhere)`);
 
 console.log('--- 5. every entry file the run did not create or back up is as the sandbox was built');
 const built = JSON.parse(fs.readFileSync(fingerprintsPath, 'utf8'));
@@ -316,6 +378,31 @@ for (const x of entries.filter(y => !y.created)) {
   if (built[rel] === sha(x.file)) same++; else { changed++; console.log('       changed without a backup: ' + rel); }
 }
 check(changed === 0 && same > 0, `${same} entry files unchanged since the build (${changed} changed without a backup)`);
+
+console.log('--- 6. links: each chat here is linked as its twin is, unless it had a link of its own');
+let linkedNew = 0, linkedOld = 0, keptOwn = 0, unlinkable = 0, wrongLinked = 0, changedOwn = 0, wrongUnlinked = 0;
+for (const x of dest) {
+  if (!x.e) continue;
+  const now = linkOf(x.e);
+  if (!x.created && isLinked(x.was)) {
+    keptOwn++;
+    if (JSON.stringify(now) !== JSON.stringify(linkOf(x.was))) { changedOwn++; say(x, 'its own link', now, linkOf(x.was)); }
+    continue;
+  }
+  const t = transcriptsOf(x.e).current;
+  const l = t ? linkFor(twinOf(t), idOf(x)) : { fields: null };
+  if (l.fields && !(appRunning && !x.created)) {
+    if (x.created) linkedNew++; else linkedOld++;
+    if (JSON.stringify(now) !== JSON.stringify(l.fields)) { wrongLinked++; say(x, 'link', now, l.fields); }
+    continue;
+  }
+  if (l.problem) unlinkable++;
+  const want = x.created ? {} : linkOf(x.was);
+  if (JSON.stringify(now) !== JSON.stringify(want)) { if (l.fields) wrongLinked++; else wrongUnlinked++; say(x, 'link', now, want); }
+}
+check(wrongLinked === 0, `links: ${linkedNew} new and ${linkedOld} existing entries carry their twin's link, each id in it turned into the receiving account's${appRunning ? ', and none the receiving account listed before the run got one while the app ran' : ''} (${wrongLinked} wrong)`);
+check(changedOwn === 0, `links of their own: the ${keptOwn} entries linked before the run kept their link as it was (${changedOwn} changed)`);
+check(wrongUnlinked === 0, `no link where none can be made: ${unlinkable} chats whose twin's link names a chat with no entry here, or is in a form not known, have none (${wrongUnlinked} have one)`);
 
 console.log(fails ? `\nCHECK FAILED -- ${fails} problem(s)` : '\nCHECK CLEAN');
 process.exit(fails ? 1 : 0);

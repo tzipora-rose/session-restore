@@ -40,6 +40,8 @@
 //   script      <tool folder> <profile> <receiving key> <work folder>
 //               faults in throwaway copies of session-restore.ps1 that check-sidebar-calls.js must
 //               catch
+//   links       <profile> <run manifest|none> <receiving key> <source key> <fingerprints> <backup run dir|none>
+//               faults in the chat entries a run gave links to, against verify-entries.js
 //   desktop-lib <tool folder> <work folder>
 //               faults in throwaway copies of lib\DesktopApp.ps1 that check-desktop-app.js must
 //               catch
@@ -49,6 +51,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { families } = require('./app-families.js');
 const here = __dirname;
 const S = 'dframe-code-sections', G = 'dframe-group-scopes', P = 'starred-local-code-sessions';
 const read = p => JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -87,11 +90,13 @@ const prefsOf = profile => path.join(profile, 'AppData', 'Local', 'Packages', 'C
 const entriesOf = (profile, key) => path.join(profile, 'AppData', 'Local', 'Packages', 'Claude_sandbox', 'LocalCache', 'Roaming', 'Claude', 'claude-code-sessions', ...key.split('/'));
 const view = () => ({ sortBy: 'recency', ascending: false, show: { metadata: false, emptyGroups: false }, collapsed: false });
 const renumber = list => list.map((s, i) => ({ ...s, order: i }));
-// the chats of an account that the tools could change and the plan covers
+// the chats of an account that the tools could change and the plan covers; a chat the sidebar
+// shows under another goes wherever its family goes, so it is not one of them
 function usableIds(profile, plan) {
   const dir = entriesOf(profile, keyOf(plan));
-  return fs.readdirSync(dir).filter(n => /^local_.*\.json$/.test(n)).map(n => read(path.join(dir, n)))
-    .filter(e => e.isArchived !== true && !e.scheduledTaskId && typeof e.createdAt === 'number' && e.createdAt <= plan.madeAtMs).map(e => e.sessionId);
+  const all = fs.readdirSync(dir).filter(n => /^local_.*\.json$/.test(n)).map(n => read(path.join(dir, n)));
+  const nested = families(all.map(e => ({ id: e.sessionId, e })));
+  return all.filter(e => e.isArchived !== true && !e.scheduledTaskId && typeof e.createdAt === 'number' && e.createdAt <= plan.madeAtMs && !nested.has(e.sessionId)).map(e => e.sessionId);
 }
 // cases that change the settings file: each is put back as it was before the next
 function settingsCases(r, prefsPath, cases, args) {
@@ -293,6 +298,10 @@ modes.script = (r, [tool, profile, receivingKey, work]) => {
     ['a filed chat not pinned again', 'if (-not $Now.Pinned.Contains($id) -or $movedIn.Contains($id)) {', 'if (-not $Now.Pinned.Contains($id)) {', '6. pinned chats that are filed'],
     ['chats made after the plan not spared', 'if (& $isNewer $id) { $newer++; $staying[$g.Name] = $staying[$g.Name] + 1; continue }', '', '5. a chat made after the plan'],
     ['archived chats not spared', 'return (-not $e.Archived -and -not $e.Routine)', 'return $true', '3. an archived chat'],
+    ['a chat under another filed on its own', '        if ($rootOf.ContainsKey($id)) { [void]$following.Add($id); continue }\n        $need.Add($id)', '        $need.Add($id)', '12. chats under another'],
+    ['a chat under another taken out of its group on its own', '        if ($rootOf.ContainsKey($id)) { [void]$following.Add($id); continue }\n        if (& $isNewer $id)', '        if (& $isNewer $id)', 'left in a group the plan lacks'],
+    ['a detached chat taken to be under its parent', "  if (Get-JsMember $Entry 'lineageDetached') { return $null }\n", '', '12. chats under another'],
+    ['a side session under an archived chat not followed up to the chat above it', '    if (-not $p.Attaches -or $e.Archived) { return $p.Id }\n', '    return $p.Id\n', '12. chats under another'],
   ];
   for (const [title, from, to, wants] of cases) {
     const copy = path.join(work, 'tool-fault');
@@ -309,6 +318,45 @@ modes.script = (r, [tool, profile, receivingKey, work]) => {
     const failed = (x.stdout || '').split(/\r?\n/).filter(l => /^\s+FAIL /.test(l));
     r.ok(x.status === 1 && failed.some(l => l.includes(wants)), `${title}: check-sidebar-calls.js must catch it`, `${failed.length} case(s) failed`);
     fs.rmSync(copy, { recursive: true, force: true });
+  }
+};
+
+modes.links = (r, [profile, manifest, receivingKey, sourceKey, fingerprints, backupDir]) => {
+  const backup = backupDir && backupDir !== 'none' ? backupDir : null;
+  const args = [path.join(here, 'verify-entries.js'), profile, manifest, receivingKey, sourceKey, fingerprints, ...(backup ? [backup] : [])];
+  if (!controlPasses(r, 'control: the entries as the run left them pass', args)) return;
+  const dir = entriesOf(profile, receivingKey), sourceDir = entriesOf(profile, sourceKey);
+  const made = new Set(manifest === 'none' ? [] : fs.readFileSync(manifest, 'utf8').split(/\r?\n/).filter(Boolean).map(p => path.basename(p).toLowerCase()));
+  const backed = new Set(backup ? read(path.join(backup, 'backup.json')).entries.map(b => path.basename(b.path).toLowerCase()) : []);
+  const files = fs.readdirSync(dir).filter(n => /^local_.*\.json$/.test(n)).sort();
+  const spawned = n => { try { const e = read(path.join(dir, n)); return e.spawnedFrom && typeof e.spawnedFrom === 'object' && !Array.isArray(e.spawnedFrom); } catch { return false; } };
+  const byRun = n => made.has(n.toLowerCase()) || backed.has(n.toLowerCase());
+  // the id the source's entry for the same chat names as its parent
+  const sourceParent = e => {
+    for (const n of fs.existsSync(sourceDir) ? fs.readdirSync(sourceDir).filter(x => /^local_.*\.json$/.test(x)) : []) {
+      let s; try { s = read(path.join(sourceDir, n)); } catch { continue; }
+      if (s.cliSessionId === e.cliSessionId && s.spawnedFrom && typeof s.spawnedFrom.sessionId === 'string') return s.spawnedFrom.sessionId;
+    }
+    return null;
+  };
+  const cases = [
+    { title: "a link left naming the parent's entry in the other account", file: files.find(n => byRun(n) && spawned(n) && sourceParent(read(path.join(dir, n)))),
+      damage: e => { e.spawnedFrom.sessionId = sourceParent(e); }, wanted: ['links: '], none: 'the run gave no link that its twin in the source names' },
+    { title: 'a link the run gave an entry already listed taken out again', file: files.find(n => backed.has(n.toLowerCase()) && spawned(n)),
+      damage: e => { delete e.spawnedFrom; delete e.forkedFromSessionId; delete e.forkedAtMessageUuid; delete e.lineageDetached; }, wanted: ['links: '], none: 'the run linked no entry already listed' },
+    // an entry the run did not back up is known to the checker by its fingerprint alone
+    { title: 'a link of its own changed', file: files.find(n => !byRun(n) && spawned(n)),
+      damage: e => { e.spawnedFrom.taskId = String(e.spawnedFrom.taskId) + '-changed'; }, wanted: ['entry files unchanged since the build'], none: 'no entry here had a link of its own' },
+  ];
+  for (const c of cases) {
+    if (!c.file) { r.skip(c.title, c.none); continue; }
+    const file = path.join(dir, c.file), original = fs.readFileSync(file);
+    try {
+      const e = JSON.parse(original.toString('utf8'));
+      c.damage(e);
+      fs.writeFileSync(file, JSON.stringify(e));
+      expectChecks(r, c.title, args, c.wanted);
+    } finally { fs.writeFileSync(file, original); }
   }
 };
 

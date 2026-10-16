@@ -36,6 +36,12 @@
 //                          a dry run first, then the run, its entries and plan checked, the calls
 //                          forward (one left unmade and listed again) and back, each checked, the
 //                          faults verify-plan.js and verify-sidebar.js must catch, -Undo
+//     links                the links between chats (stage-sandbox.js stages them whatever this
+//                          computer's data holds: a chain the run creates two chats of, a chat
+//                          already listed, a fork, a detached chat, a chat linked here already, a
+//                          chat whose parent the source does not have): a dry run, the run, each
+//                          case, verify-entries.js and the faults it must catch, the calls with
+//                          the families in place, -Undo
 //     calls                check-sidebar-calls.js, and faults in the script it must catch
 //     source-by-id         the config names the source by its id, and no file names its email
 //     source-from-settings the sidebar's own storage absent: the groups come from the settings file
@@ -60,7 +66,8 @@
 //                          all (each refused, nothing written)
 //     app-running          a stand-in program (a copy of ping.exe) running from the sandbox's
 //                          AppData\Local\AnthropicClaude: -Undo of a run that moved chats refuses,
-//                          and a run leaves a chat's folder alone; each goes ahead once it stops
+//                          and a run leaves a chat's folder alone, and links only the chats it
+//                          creates; each goes ahead once it stops
 //   and one pass run only when named, since it opens minimized windows on the desktop through
 //   Explorer for a few seconds each:
 //     explorer             what a console started by Explorer, at Medium integrity, sees of the
@@ -85,13 +92,14 @@ const crypto = require('crypto');
 const { spawnSync, spawn } = require('child_process');
 const stage = require('./stage-sandbox.js');
 const faults = require('./make-faults.js');
+const { families } = require('./app-families.js');
 // Windows PowerShell 5.1 started with PowerShell 7's PSModulePath finds 7's copies of the modules
 // both have before its own and loses commands such as Get-FileHash, which new-sandbox.ps1 needs;
 // without the variable it builds its own path.
 for (const k of Object.keys(process.env)) if (/^psmodulepath$/i.test(k)) delete process.env[k];
 
 const here = __dirname;
-const ALL = ['static', 'desktop-app', 'run', 'calls', 'source-by-id', 'source-from-settings', 'source-from-list', 'as-source', 'config', 'list', 'export-import', 'sections', 'left-alone', 'unpackaged', 'app-running'];
+const ALL = ['static', 'desktop-app', 'run', 'links', 'calls', 'source-by-id', 'source-from-settings', 'source-from-list', 'as-source', 'config', 'list', 'export-import', 'sections', 'left-alone', 'unpackaged', 'app-running'];
 const ON_REQUEST = ['explorer'];
 const opt = { pass: ALL.join(','), keep: false };
 const argv = process.argv.slice(2);
@@ -193,17 +201,20 @@ const readJson = p => JSON.parse(fs.readFileSync(p, 'utf8'));
 const prefsOf = b => readJson(b.prefs).preferences.epitaxyPrefs;
 const entryIds = (b, key) => fs.readdirSync(b.entries(key)).filter(n => /^local_.*\.json$/.test(n)).map(n => n.replace(/\.json$/, ''));
 
-// the run's entries, when it created any, and its plan
-function checkRun(b, dir, out, sourceKeyForEntries, planArgs) {
-  const m = manifests(dir).pop();
-  if (m) {
-    const st = m.replace(/^created-entries-|\.txt$/g, '');
-    const args = [instrument('verify-entries.js'), b.profile, path.join(dir, m), planArgs[1], sourceKeyForEntries, b.fingerprints];
-    const backup = path.join(b.data, 'backups', st);
-    if (fs.existsSync(backup)) args.push(backup);
-    checker('verify-entries.js on the run', args);
-  } else expect(out, /^Nothing to create/, 'the run created no entry, and says so');
+// the run's entries, those it created and those it changed, and its plan; gives the run's manifest
+// and backup folder ("none" for either it did not write), for the faults
+function checkRun(b, dir, out, sourceKeyForEntries, planArgs, fingerprints = b.fingerprints, extra = []) {
+  const madeLine = out.map(l => /^Manifest \(for -Undo\): (.+)$/.exec(l)).filter(Boolean).pop();
+  const m = madeLine ? madeLine[1].trim() : null;
+  if (!m) expect(out, /^Nothing to create/, 'the run created no entry, and says so');
+  const shown = out.map(l => /^Backup  : (.+)$/.exec(l)).filter(Boolean).pop();
+  let backup = shown ? shown[1].trim() : null;
+  if (!backup && m) backup = path.join(b.data, 'backups', path.basename(m).replace(/^created-entries-|\.txt$/g, ''));
+  if (backup && !fs.existsSync(backup)) backup = null;
+  const manifest = m || 'none';
+  checker('verify-entries.js on the run', [instrument('verify-entries.js'), b.profile, manifest, planArgs[1], sourceKeyForEntries, fingerprints, ...(backup ? [backup] : []), ...extra]);
   if (planArgs[0]) checker('verify-plan.js on the plan' + (planArgs[2] ? ` (${planArgs[2].join(' ')})` : ''), [instrument('verify-plan.js'), b.profile, b.plan, planArgs[0], planArgs[1], ...(planArgs[2] || [])]);
+  return { manifest, backup: backup || 'none' };
 }
 // the calls -Sidebar lists, made by the stand-in until the sidebar matches the plan; gives
 // whether it then matches, and the calls first listed
@@ -257,6 +268,28 @@ function sidebarNow(b, key) {
   return { groups, pinned: new Set((ep['starred-local-code-sessions'] || []).filter(id => ids.has(id))).size };
 }
 const summary = now => `${now.groups.length ? now.groups.map(g => `"${g.name}" (${g.sessions.length})`).join(', ') : 'no groups with chats'}; ${now.pinned} pinned`;
+// whether two lists or exports of an account hold the same groups and pins as the sidebar shows
+// them: a chat shown under another is left out of the groups, since it shows wherever the chat at
+// the top of its family goes, and the app files only that chat's own key (app-families.js); the
+// pins are compared whole
+function sameShown(b, key, fileA, fileB) {
+  const dir = b.entries(key);
+  const all = fs.readdirSync(dir).filter(n => /^local_.*\.json$/.test(n)).map(n => { try { return readJson(path.join(dir, n)); } catch { return null; } }).filter(Boolean);
+  const top = families(all.map(e => ({ id: e.sessionId, e })));
+  const nested = new Set(all.filter(e => top.has(e.sessionId) && e.cliSessionId).map(e => e.cliSessionId));
+  let asideFirst = 0, asideAgain = 0;
+  const view = (f, count) => {
+    const l = readJson(f);
+    const groups = (l.groups || []).map(g => {
+      const kept = (g.transcripts || []).filter(t => !nested.has(t));
+      count((g.transcripts || []).length - kept.length);
+      return { name: g.name, transcripts: kept };
+    }).filter(g => g.transcripts.length);
+    return JSON.stringify({ account: l.accountUuid, groups, pinned: l.pinned });
+  };
+  const same = view(fileA, n => { asideFirst += n; }) === view(fileB, n => { asideAgain += n; });
+  return { same, asideFirst, asideAgain };
+}
 // what a saved list or an export holds, in the tool's words; the counts are verify-list.js's to check
 function contentRe(now) {
   const parts = now.groups.map(g => `"${esc(g.name)}" \\(\\d+ chats?\\)`);
@@ -433,11 +466,59 @@ pass.run = () => {
   removeBox(b);
 };
 
+const linkedLine = /^Links: (\d+) chat\(s\) are now shown under the chat they were started from, as the same chat's entry in another account is: (\d+) new, and (\d+) already listed here\.$/;
+
+pass.links = () => {
+  const dir = toolCopy('links');
+  const b = newBox('srp-links', recvAcct);
+  setConfig(dir, srcAcct, 0);
+  const asBuilt = fs.readFileSync(b.prefs);
+  stage.wipe(b.prefs, RK, b.entries(RK));
+  let staged;
+  try { staged = stage.links(b, RK, SK); } catch (x) { skip('the links a run gives', x.message); fs.writeFileSync(b.prefs, asBuilt); return removeBox(b); }
+  const c = staged.cases;
+  const fp = path.join(b.sandbox, 'fingerprints-staged.json');
+  stage.fingerprints(b, fp);
+  try {
+    let out = tool(b, dir, ['-DryRun']);
+    const would = out.map(l => /^Links: would show (\d+) chat\(s\) under the chat they were started from, as the same chat's entry in another account is shown: (\d+) new, and (\d+) already listed here, which a run links only while Claude is fully quit\.$/.exec(l)).find(Boolean);
+    ok(!!would && Number(would[2]) >= 2 && Number(would[3]) >= 3, 'a dry run says how many chats it would link, new and already listed', would ? would.slice(1).join(', ') : 'no such line');
+    ok(!manifests(dir).length && !fs.existsSync(path.join(b.data, 'backups')), 'and writes no entry and no backup');
+    out = tool(b, dir, []);
+    const said = out.map(l => linkedLine.exec(l)).find(Boolean);
+    ok(!!said && Number(said[2]) >= 2 && Number(said[3]) >= 3, 'the run links the chats it created and chats already listed, and says how many', said ? said.slice(1).join(', ') : 'no such line');
+    expect(out, /^Links: \d+ chat\(s\) were started from a chat that has no entry here, so they stay at the top level\.$/, 'and says that a chat whose parent has no entry here stays at the top level');
+    const checked = checkRun(b, dir, out, SK, [SK, RK], fp);
+    // each staged case, read from the entries here
+    const byT = new Map();
+    for (const id of entryIds(b, RK)) { try { const e = readJson(path.join(b.entries(RK), id + '.json')); const t = e.cliSessionId || e.unarchivedCliSessionId; if (t) byT.set(t, e); } catch { /* unreadable entry */ } }
+    const at = n => byT.get(c[n].transcript) || {};
+    const sf = n => at(n).spawnedFrom || {};
+    ok(at('c3').sessionId && at('c3').sessionId !== c.c3.here && at('c2').sessionId !== c.c2.here && sf('c3').sessionId === at('c2').sessionId && sf('c3').sideSession === true && sf('c3').name === 'stage-chain', 'a chain: the run created c3 and c2, and linked c3 to the c2 it created, with the rest of its link as in the source');
+    ok(sf('c2').sessionId === c.c1.here, '         and c2 to the c1 already listed here');
+    ok(sf('l2').sessionId === c.l1.here && sf('l2').sideSession === true && sf('l2').wakeParent === false && sf('l2').name === 'stage-listed', "a chat already listed got its twin's link, its parent turned into the one here");
+    ok(at('k2').forkedFromSessionId === c.k1.here && at('k2').forkedAtMessageUuid === '00000000-0000-4000-8000-0000000000aa' && !('spawnedFrom' in at('k2')), 'a fork got the chat it was forked from, turned, and the message it was forked at');
+    ok(at('d2').lineageDetached === true && sf('d2').sessionId === c.d1.here, 'a chat taken out from under its parent got both');
+    ok(sf('o2').sessionId === c.o3.here && sf('o2').taskId === 'task_stage_own_here', 'a chat linked here already kept its own link');
+    ok(at('n1').cliSessionId && !('spawnedFrom' in at('n1')), "a chat whose parent the source has no entry for stayed unlinked");
+    mergeFaults('links', [b.profile, checked.manifest, RK, SK, fp, checked.backup]);
+    const ref = path.join(b.sandbox, 'prefs-before-calls.json');
+    fs.copyFileSync(b.prefs, ref);
+    if (applyCalls(b, dir, RK).matched) checker('verify-sidebar.js, aim desired, the families in place', [instrument('verify-sidebar.js'), b.profile, b.plan, 'desired', ref]);
+    fs.writeFileSync(b.prefs, asBuilt);
+    out = tool(b, dir, ['-Undo']);
+    expect(out, /^Put back every file run \d{8}-\d{6} changed \(chat entries it moved to another folder or linked, /, '-Undo puts back the entries the run linked');
+    expect(out, /^Removed \d+ entries from manifest /, 'and removes the entries it created');
+  } finally { staged.restore(); fs.writeFileSync(b.prefs, asBuilt); }
+  compareBox(b, 'everything staged put back, the sandbox is as it was built');
+  removeBox(b);
+};
+
 pass.calls = () => {
   const dir = toolCopy('calls');
   const b = newBox('srp-calls', recvAcct);
   const x = node([instrument('check-sidebar-calls.js'), dir, b.profile, RK]);
-  if (/needs 215 and 1/.test(x.lines.join('\n'))) skip('check-sidebar-calls.js and the faults in the script', 'the receiving account has fewer than 215 chats the tools can change, or no archived chat');
+  if (/it needs 215, 6 and 1/.test(x.lines.join('\n'))) skip('check-sidebar-calls.js and the faults in the script', 'the receiving account has fewer than 215 chats the tools can change and 6 more linked to none, or no archived chat linked to none');
   else {
     ok(x.status === 0, 'check-sidebar-calls.js', x.status === 0 ? x.last : `exit ${x.status}`);
     if (x.status !== 0) show(x.lines);
@@ -707,7 +788,8 @@ pass['export-import'] = () => {
     checker('verify-list.js: the saved list holds the groups and pins again', [instrument('verify-list.js'), s.profile, SK]);
     out = tool(s, dir, ['-Export']);
     const again = out.map(l => exportLine.exec(l)).find(Boolean);
-    ok(!!again && stage.same(exp1, again[1]), 'a new export holds exactly the groups and pins of the first one');
+    const shown = again ? sameShown(s, SK, exp1, again[1]) : null;
+    ok(!!shown && shown.same, "a new export holds the groups and pins of the first one, chats under another left out of the groups", shown ? `${shown.asideFirst} and ${shown.asideAgain} grouped chat(s) under another left out` : 'no export written');
   }
   fs.writeFileSync(s.prefs, sBuilt);
   // an export imported under the other account, and back
@@ -1046,6 +1128,32 @@ pass['app-running'] = () => {
     tool(b, dir, ['-Undo']);
     for (let k = 0; k < 3 && manifests(dir).length; k++) tool(b, dir, ['-Undo']);
     fs.writeFileSync(pair.file, bytes);
+  }
+
+  // links: while the app runs, a run links the chats it creates, which the app has not loaded,
+  // and no chat already listed, and says why; once it has stopped, a run links those too
+  let staged = null;
+  try { staged = stage.links(b, RK, SK); } catch (x) { skip('links while the app runs', x.message); }
+  if (staged) {
+    try {
+      const fp = path.join(b.sandbox, 'fingerprints-staged.json');
+      stage.fingerprints(b, fp);
+      standin = startStandin(b);
+      try {
+        out = tool(b, dir, []);
+        expect(out, /^Links: \d+ chat\(s\) already listed here were not linked, because Claude is still running \(1 of its processes are running\)\. Quit it fully, including from the system tray, and run this script again to link them\.$/, 'while the stand-in runs, a run gives no link to a chat already listed, and says why');
+        checkRun(b, dir, out, SK, [null, RK], fp, ['--app-running']);
+      } finally { ok(stopStandin(standin), 'the stand-in is stopped'); }
+      const fp2 = path.join(b.sandbox, 'fingerprints-after-first.json');
+      stage.fingerprints(b, fp2);
+      out = tool(b, dir, []);
+      const said = out.map(l => linkedLine.exec(l)).find(Boolean);
+      ok(!!said && Number(said[2]) === 0 && Number(said[3]) >= 3, 'once it has stopped, a run links the chats already listed', said ? said.slice(1).join(', ') : 'no such line');
+      checkRun(b, dir, out, SK, [null, RK], fp2);
+      // both runs taken back, the newest first
+      tool(b, dir, ['-Undo']);
+      for (let k = 0; k < 3 && manifests(dir).length; k++) tool(b, dir, ['-Undo']);
+    } finally { staged.restore(); }
   }
   compareBox(b, 'the sandbox is as it was built');
   removeBox(b);

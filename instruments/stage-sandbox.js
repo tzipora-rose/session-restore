@@ -46,6 +46,11 @@
 //                                             its email or its id (none: no account), with the
 //                                             automatic setting; the other settings are copied
 //                                             from <in>
+// and, from prove-tool.js only:
+//   links(box, receiving key, source key)     stages the cases links are proven on (below), and
+//                                             gives them with a way to put everything back
+//   fingerprints(box, file)                   writes the store's fingerprints, in the form
+//                                             new-sandbox.ps1 writes them, for a staged state
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -170,7 +175,90 @@ function config(inPath, outPath, account, form, auto, knownFile) {
   fs.writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n');
 }
 
-module.exports = { ROOT, box, guard, read, write, wipe, dropScope, emptyGroup, pick, newer, fileIn, pin, state, dupe, noPins, same, groupsLeftAlone, forgetAccount, emailOf, config };
+// The cases a run's links are proven on, staged in a sandbox whatever links this computer's own
+// data holds, by editing chat entries and setting some aside. They use chats both accounts list
+// once, whose transcript is on this computer, that neither account has archived, made a routine's
+// run, grouped, pinned or linked, and that no entry names as its parent or keeps as another part
+// of its chat. In the source account:
+//   chain     c3, a side session, started from c2, and c2 started from c1; the receiving account's
+//             entries for c3 and c2 are set aside, so a run creates both, linking c3 to the c2 it
+//             creates and c2 to the c1 already here
+//   listed    l2, a side session started from l1: the entry here has no link, and a run gives it one
+//   fork      k2 forked from k1 at a message: the entry here gets the fork and the message
+//   detached  d2 started from d1 and taken out from under it: the entry here gets both
+//   own       o2 started from o1, while the entry here was started from o3 here: it is left alone
+//   orphan    n1 started from an entry the source does not have: the entry here stays unlinked
+// Gives { cases, restore }: each case's chats by name, each with its transcript and its entry ids
+// in both accounts; restore() puts back every file changed or set aside.
+function links(b, receivingKey, sourceKey) {
+  const linkedFields = ['spawnedFrom', 'forkedFromSessionId', 'lineageDetached'];
+  const isLinked = e => linkedFields.some(k => Object.prototype.hasOwnProperty.call(e, k));
+  const current = e => (typeof e.cliSessionId === 'string' && e.cliSessionId) || (typeof e.unarchivedCliSessionId === 'string' && e.unarchivedCliSessionId) || null;
+  const load = key => fs.readdirSync(b.entries(key)).filter(n => /^local_.*\.json$/.test(n)).map(n => {
+    const file = path.join(b.entries(key), n);
+    let e = null; try { e = read(file); } catch { /* unreadable */ }
+    return { id: (e && e.sessionId) || n.replace(/\.json$/, ''), file, e };
+  }).filter(x => x.e);
+  const mine = load(receivingKey), theirs = load(sourceKey);
+  const onDisk = new Set();
+  const projects = path.join(b.profile, '.claude', 'projects');
+  for (const d of fs.readdirSync(projects, { withFileTypes: true })) if (d.isDirectory()) for (const f of fs.readdirSync(path.join(projects, d.name))) if (/\.jsonl$/i.test(f)) onDisk.add(f.slice(0, -6));
+  const ep = read(b.prefs).preferences.epitaxyPrefs;
+  const filed = new Set(), pinned = new Set(ep[PINS] || []);
+  for (const key of [receivingKey, sourceKey]) for (const k of Object.keys(((ep[GROUPS] || {})[key] || {}).assignments || {})) filed.add(k.slice(5));
+  const parents = new Set(), parts = new Set();
+  for (const x of [...mine, ...theirs]) {
+    const sf = x.e.spawnedFrom;
+    if (sf && typeof sf.sessionId === 'string') parents.add(sf.sessionId);
+    if (typeof x.e.forkedFromSessionId === 'string') parents.add(x.e.forkedFromSessionId);
+    for (const t of [x.e.preClearCliSessionId, x.e.unarchivedCliSessionId, ...(Array.isArray(x.e.priorCliSessionIds) ? x.e.priorCliSessionIds : [])]) if (typeof t === 'string' && t && t !== current(x.e)) parts.add(t);
+  }
+  const usable = x => x.e.isArchived !== true && !x.e.scheduledTaskId && x.e.projectThreadStarted !== true && !isLinked(x.e) && !filed.has(x.id) && !pinned.has(x.id) && !parents.has(x.id);
+  const byT = list => { const m = new Map(); for (const x of list) { const t = current(x.e); if (!t) continue; if (!m.has(t)) m.set(t, []); m.get(t).push(x); } return m; };
+  const mineByT = byT(mine), theirsByT = byT(theirs);
+  const pool = [...mineByT.keys()].filter(t => onDisk.has(t) && !parts.has(t) && mineByT.get(t).length === 1 && (theirsByT.get(t) || []).length === 1 && usable(mineByT.get(t)[0]) && usable(theirsByT.get(t)[0])).sort();
+  const names = ['c1', 'c2', 'c3', 'l1', 'l2', 'k1', 'k2', 'd1', 'd2', 'o1', 'o2', 'o3', 'n1'];
+  if (pool.length < names.length) throw new Error(`the sandbox has ${pool.length} chats both accounts list that the staging can use; it needs ${names.length}`);
+  const chat = {};
+  names.forEach((n, i) => { const t = pool[i]; chat[n] = { t, here: mineByT.get(t)[0], there: theirsByT.get(t)[0] }; });
+  const kept = new Map(), asideDir = path.join(b.sandbox, 'links-aside'), aside = [];
+  const edit = (x, change) => { guard(x.file); if (!kept.has(x.file)) kept.set(x.file, fs.readFileSync(x.file)); const e = read(x.file); change(e); fs.writeFileSync(x.file, JSON.stringify(e)); };
+  const setAside = x => { guard(x.file); fs.mkdirSync(asideDir, { recursive: true }); const to = path.join(asideDir, path.basename(x.file)); fs.renameSync(x.file, to); aside.push({ from: x.file, to }); };
+  const spawned = (n, parentId, extra = {}) => edit(chat[n].there, e => { e.spawnedFrom = { sessionId: parentId, taskId: 'task_stage_' + n, title: e.title || n, ...extra }; });
+  spawned('c3', chat.c2.there.id, { sideSession: true, sharedFolder: true, name: 'stage-chain' });
+  spawned('c2', chat.c1.there.id);
+  setAside(chat.c3.here); setAside(chat.c2.here);
+  spawned('l2', chat.l1.there.id, { sideSession: true, wakeParent: false, name: 'stage-listed' });
+  edit(chat.k2.there, e => { e.forkedFromSessionId = chat.k1.there.id; e.forkedAtMessageUuid = '00000000-0000-4000-8000-0000000000aa'; });
+  spawned('d2', chat.d1.there.id, { sideSession: true });
+  edit(chat.d2.there, e => { e.lineageDetached = true; });
+  spawned('o2', chat.o1.there.id);
+  edit(chat.o2.here, e => { e.spawnedFrom = { sessionId: chat.o3.here.id, taskId: 'task_stage_own_here', title: e.title || 'o2' }; });
+  spawned('n1', 'local_00000000-0000-4000-8000-00000000dead');
+  const cases = {};
+  for (const n of names) cases[n] = { transcript: chat[n].t, here: chat[n].here.id, there: chat[n].there.id, file: chat[n].here.file };
+  const restore = () => {
+    for (const [file, bytes] of kept) fs.writeFileSync(file, bytes);
+    for (const a of aside) if (fs.existsSync(a.to)) fs.renameSync(a.to, a.from);
+  };
+  return { cases, restore };
+}
+
+// the fingerprints of every file of a sandbox's store, as new-sandbox.ps1 writes them
+function fingerprints(b, out) {
+  const map = {};
+  const walk = d => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p); else map[path.relative(b.store, p)] = crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex').toUpperCase();
+    }
+  };
+  walk(b.store);
+  guard(out);
+  fs.writeFileSync(out, JSON.stringify(map));
+}
+
+module.exports = { ROOT, box, guard, read, write, wipe, dropScope, emptyGroup, pick, newer, fileIn, pin, state, dupe, noPins, same, groupsLeftAlone, forgetAccount, emailOf, config, links, fingerprints };
 
 if (require.main === module) {
   const [cmd, ...a] = process.argv.slice(2);

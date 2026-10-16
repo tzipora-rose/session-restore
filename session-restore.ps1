@@ -37,6 +37,13 @@
   title, model, effort, archived state and earlier transcripts from the same chat's entry in
   another account, or else from the transcript.
 
+  LINKS: a chat started from another chat (a side session, a hand-off, a fork, a task it
+  started) is shown under that chat in the sidebar. Its entry names the other chat by its entry
+  id, which differs between accounts, so the script copies the link from the same chat's entry
+  in another account with each id turned into this account's entry for the same chat: into each
+  entry it creates, and, while Claude is fully quit, into each entry here that has no link of
+  its own. An entry that has a link is never changed.
+
   If session-restore.config.json names an account in copyGroupsFromEmail, the script also puts
   each chat in the folder its twin in that account names, and works out what has to change so
   that the current account's groups and pinned chats are an exact copy of that account's,
@@ -85,7 +92,7 @@
 
   SAFETY: new sidebar entries are new files only, listed per run in a
   created-entries-<stamp>.txt next to this script. Before a chat entry is moved to another
-  folder, and before the config file is filled in, the file is copied to
+  folder or given a link, and before the config file is filled in, the file is copied to
   .session-restore\backups\<stamp>\ in the user profile, and a write that fails
   its check is rolled back from that copy. -Undo reverses the newest run: it deletes that run's
   new entries and puts the backed-up files back exactly as they were. The script never writes
@@ -343,11 +350,13 @@ function Get-EntryTranscripts($Entry) {
   [pscustomobject]@{ Current = $current; Others = $others.ToArray() }
 }
 
-# Every sidebar entry in every account's org folders, by the transcript its chat resumes; and, by
-# transcript, the entries that keep it as another part of their chat.
+# Every sidebar entry in every account's org folders, by the transcript its chat resumes; by
+# transcript, the entries that keep it as another part of their chat; and by account, org and
+# entry id ("<account>/<org>/<id>").
 function Get-EntriesByTranscript([string]$SessionsRoot) {
   $byTranscript = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]'
   $partOf = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]'
+  $byId = New-Object 'System.Collections.Generic.Dictionary[string,object]'
   $unreadable = New-Object System.Collections.Generic.List[string]
   foreach ($accountDir in (Get-ChildItem -LiteralPath $SessionsRoot -Directory)) {
     foreach ($orgDir in (Get-ChildItem -LiteralPath $accountDir.FullName -Directory)) {
@@ -355,6 +364,9 @@ function Get-EntriesByTranscript([string]$SessionsRoot) {
         try { $entry = ConvertFrom-JsJson (Read-TextFile $file.FullName) } catch { $unreadable.Add($file.FullName); continue }
         if (-not ($entry -is [System.Collections.IDictionary])) { $unreadable.Add($file.FullName); continue }
         $item = [pscustomobject]@{ Account = $accountDir.Name; Org = $orgDir.Name; Path = $file.FullName; Entry = $entry }
+        $entryId = Get-JsMember $entry 'sessionId'
+        if (-not ($entryId -is [string]) -or -not $entryId) { $entryId = $file.BaseName }
+        $byId[$accountDir.Name + '/' + $orgDir.Name + '/' + $entryId] = $item
         $transcripts = Get-EntryTranscripts $entry
         foreach ($part in $transcripts.Others) {
           if (-not $partOf.ContainsKey($part)) { $partOf[$part] = New-Object System.Collections.Generic.List[object] }
@@ -367,7 +379,7 @@ function Get-EntriesByTranscript([string]$SessionsRoot) {
       }
     }
   }
-  [pscustomobject]@{ ByTranscript = $byTranscript; PartOf = $partOf; Unreadable = $unreadable }
+  [pscustomobject]@{ ByTranscript = $byTranscript; PartOf = $partOf; ById = $byId; Unreadable = $unreadable }
 }
 
 # An entry's time field as epoch milliseconds, or $null when it is not a whole number.
@@ -422,21 +434,25 @@ function Select-TranscriptCopy($Copies, $FolderByProject) {
 
 function Get-Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 
-# Copies everything a run is about to change - chat entries it moves to another folder and,
-# when the run fills in the config's account, the config file - into the run's backup folder,
-# each copy checked against its original, with a record -Undo reads. A second call adds to it.
+# Copies everything a run is about to change - chat entries it moves to another folder or gives a
+# link and, when the run fills in the config's account, the config file - into the run's backup
+# folder, each copy checked against its original, with a record -Undo reads. A second call adds
+# to it, and keeps the first copy of a file it already holds: that copy is the file as it was
+# before the run.
 function Backup-RunFiles([string]$RunDir, [string[]]$EntryFiles, [string]$ConfigPath) {
   New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
   $recordPath = Join-Path $RunDir 'backup.json'
   $record = New-JsObject
   if (Test-Path -LiteralPath $recordPath) { $record = ConvertFrom-JsJson (Read-TextFile $recordPath) }
   $entryRecords = New-Object System.Collections.Generic.List[object]
-  foreach ($item in @(Get-JsList $record 'entries')) { $entryRecords.Add($item) }
+  $held = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($item in @(Get-JsList $record 'entries')) { $entryRecords.Add($item); [void]$held.Add([string]$item['path']) }
   $paths = @($EntryFiles | Where-Object { $_ })
   if ($paths.Count -gt 0) {
     $entryDir = Join-Path $RunDir 'entries'
     New-Item -ItemType Directory -Path $entryDir -Force | Out-Null
     foreach ($path in $paths) {
+      if (-not $held.Add($path)) { continue }
       $name = Split-Path -Leaf $path
       Copy-Item -LiteralPath $path -Destination (Join-Path $entryDir $name)
       $item = New-JsObject
@@ -510,12 +526,15 @@ function Get-AccountEntries([string]$OrgDir) {
       $id = [string](Get-JsMember $entry 'sessionId')
       if (-not $id) { $id = $file.BaseName }
       $transcript = (Get-EntryTranscripts $entry).Current
+      $thread = Get-JsMember $entry 'projectThreadStarted'
       $byId[$id] = [pscustomobject]@{
         Id = $id; Transcript = $transcript; Path = $file.FullName
         Title = [string](Get-JsMember $entry 'title')
         Archived = ((Get-JsMember $entry 'isArchived') -eq $true)
         Routine = [bool](Get-JsMember $entry 'scheduledTaskId')
         CreatedMs = (Get-EntryTimeMs $entry 'createdAt')
+        Parent = (Get-EntryParent $entry)
+        ProjectThread = ($thread -is [bool] -and $thread)
       }
       if ($transcript) {
         if (-not $byTranscript.ContainsKey($transcript)) { $byTranscript[$transcript] = New-Object System.Collections.Generic.List[string] }
@@ -524,6 +543,144 @@ function Get-AccountEntries([string]$OrgDir) {
     }
   }
   [pscustomobject]@{ ById = $byId; ByTranscript = $byTranscript }
+}
+
+# The chat the sidebar shows an entry's chat under, as the desktop app works it out each time it
+# loads the entry (read in desktop app 2.37337.1.0): none once the chat has been detached from it
+# (lineageDetached); else the chat a side session or a hand-off was started from; else the chat
+# it was forked from; else the chat that started it (spawnedFrom). Attaches says whether the app
+# looks past an archived parent to the nearest chat above it that is not archived: it does for a
+# side session or a hand-off, and for the others only where a switch of Anthropic's is on, which
+# this script takes to be off.
+function Get-EntryParent($Entry) {
+  if (Get-JsMember $Entry 'lineageDetached') { return $null }
+  $own = [string](Get-JsMember $Entry 'sessionId')
+  $spawned = Get-JsMember $Entry 'spawnedFrom'
+  if ($spawned -and ([string](Get-JsMember $spawned 'sessionId')) -ceq $own) { $spawned = $null }
+  $hasFork = (Test-JsKey $Entry 'forkedFromSessionId') -and -not (([string](Get-JsMember $Entry 'forkedFromSessionId')) -ceq $own)
+  $fork = $null
+  if ($hasFork) { $fork = Get-JsMember $Entry 'forkedFromSessionId' }
+  $spawnedId = Get-JsMember $spawned 'sessionId'
+  if ($spawned -is [System.Collections.IDictionary] -and (Get-JsMember $spawned 'sideSession') -and -not (Get-JsMember $spawned 'userFork')) {
+    $deleted = Get-JsMember (Get-JsMember $spawned 'deletedParent') 'sessionId'
+    if (-not $hasFork -or ($fork -ceq $spawnedId) -or ($null -ne $deleted -and $fork -ceq $deleted)) { return [pscustomobject]@{ Id = $spawnedId; Attaches = $true } }
+  }
+  if ($hasFork) { return [pscustomobject]@{ Id = $fork; Attaches = $false } }
+  if ($spawned) { return [pscustomobject]@{ Id = $spawnedId; Attaches = $false } }
+  return $null
+}
+
+# Which of an account's chats the sidebar shows under another, each with the chat at the top of
+# its family: the desktop app's own rule (2.37337.1.0). A chat goes under its parent when the
+# parent is listed and is not archived while the chat is not; a side session or a hand-off whose
+# parent is archived goes under the nearest chat above it that is not, when there is one. A chat
+# the app counts as a project's thread is in no family. The app moves a family only whole: a
+# chat under another cannot be filed unless the chat at the top is filed in the same call, and the
+# chats under the chat at the top show under it wherever it goes.
+function Get-ChatFamilies($Entries) {
+  $rootOf = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+  $listed = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+  foreach ($e in $Entries.ById.Values) { if (-not $e.ProjectThread) { $listed[$e.Id] = $e } }
+  $parentOf = {
+    param($e)
+    $p = $e.Parent
+    if (-not $p -or -not ($p.Id -is [string]) -or -not $p.Id) { return $null }
+    if (-not $p.Attaches -or $e.Archived) { return $p.Id }
+    $at = $p.Id
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$seen.Add($e.Id)
+    for ($k = 0; $k -lt 32; $k++) {
+      $above = $null
+      if (-not $listed.TryGetValue($at, [ref]$above) -or $seen.Contains($at)) { return $p.Id }
+      if (-not $above.Archived) { return $at }
+      [void]$seen.Add($at)
+      $next = $above.Parent
+      if (-not $next -or -not $next.Attaches -or -not ($next.Id -is [string]) -or -not $next.Id) { return $p.Id }
+      $at = $next.Id
+    }
+    return $p.Id
+  }
+  $under = {
+    param($e)
+    $id = & $parentOf $e
+    $p = $null
+    if (-not $id -or -not $listed.TryGetValue($id, [ref]$p) -or ($id -ceq $e.Id) -or ($p.Archived -and -not $e.Archived)) { return $null }
+    return $id
+  }
+  foreach ($e in $listed.Values) {
+    $top = & $under $e
+    if (-not $top) { continue }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$seen.Add($e.Id)
+    [void]$seen.Add($top)
+    $next = & $under $listed[$top]
+    while ($next -and -not $seen.Contains($next)) { $top = $next; [void]$seen.Add($next); $next = & $under $listed[$top] }
+    $rootOf[$e.Id] = $top
+  }
+  , $rootOf
+}
+
+# The fields that link an entry's chat to another chat: spawnedFrom (the chat that started it, by
+# its entry id), forkedFromSessionId (the chat it was forked from, by its entry id) with
+# forkedAtMessageUuid (the message it was forked at, the same in every account), and
+# lineageDetached (taken out from under its parent).
+$linkPaths = @('spawnedFrom', 'forkedFromSessionId', 'forkedAtMessageUuid', 'lineageDetached')
+function Test-EntryLinked($Entry) {
+  foreach ($name in @('spawnedFrom', 'forkedFromSessionId', 'lineageDetached')) { if (Test-JsKey $Entry $name) { return $true } }
+  return $false
+}
+
+# A twin's link, made for this account: its link fields, each entry id they name turned into the
+# id here of the entry for the same chat, which $IdHere gives from the chat's transcript. Gives
+# the fields to add; or, when the link cannot be made here, Problem: "parent" when the chat it
+# names has no entry here, "shape" when the link is in a form this script does not know.
+function Get-TwinLink($Twin, $EntriesById, [scriptblock]$IdHere, [string]$OwnId) {
+  $result = [pscustomobject]@{ Fields = $null; Problem = $null }
+  if (-not (Test-EntryLinked $Twin.Entry)) { return $result }
+  $resolve = {
+    param($id)
+    if (-not ($id -is [string]) -or -not $id) { return $null }
+    $other = $null
+    if (-not $EntriesById.TryGetValue($Twin.Account + '/' + $Twin.Org + '/' + $id, [ref]$other)) { return $null }
+    $transcript = (Get-EntryTranscripts $other.Entry).Current
+    if (-not $transcript) { return $null }
+    $here = & $IdHere $transcript
+    if (-not $here -or $here -ceq $OwnId) { return $null }
+    return $here
+  }
+  $fields = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+  if (Test-JsKey $Twin.Entry 'spawnedFrom') {
+    $spawned = $Twin.Entry['spawnedFrom']
+    if (-not ($spawned -is [System.Collections.IDictionary])) { $result.Problem = 'shape'; return $result }
+    $here = & $resolve (Get-JsMember $spawned 'sessionId')
+    if (-not $here) { $result.Problem = 'parent'; return $result }
+    $copy = Copy-JsValue $spawned
+    $copy['sessionId'] = $here
+    $fields['spawnedFrom'] = $copy
+  }
+  if (Test-JsKey $Twin.Entry 'forkedFromSessionId') {
+    $fork = $Twin.Entry['forkedFromSessionId']
+    if (-not ($fork -is [string]) -or -not $fork) { $result.Problem = 'shape'; return $result }
+    $here = & $resolve $fork
+    if (-not $here) { $result.Problem = 'parent'; return $result }
+    $fields['forkedFromSessionId'] = $here
+    if (Test-JsKey $Twin.Entry 'forkedAtMessageUuid') { $fields['forkedAtMessageUuid'] = Copy-JsValue $Twin.Entry['forkedAtMessageUuid'] }
+  }
+  if (Test-JsKey $Twin.Entry 'lineageDetached') { $fields['lineageDetached'] = Copy-JsValue $Twin.Entry['lineageDetached'] }
+  $result.Fields = $fields
+  $result
+}
+
+# Whether an entry, read back after its link was written, differs from what it was in its link
+# fields alone, and holds each field it was given exactly as given.
+function Test-LinkWritten($Was, $Is, $Fields) {
+  $unexpected = $null
+  $allowed = @($linkPaths | ForEach-Object { Get-JsPath '$' $_ })
+  if (-not (Test-JsChangeConfined $Was $Is $allowed ([ref]$unexpected))) { return $false }
+  foreach ($name in @($Fields.Keys)) {
+    if (-not (Test-JsKey $Is $name) -or ((ConvertTo-JsJson $Is[$name]) -cne (ConvertTo-JsJson $Fields[$name]))) { return $false }
+  }
+  return $true
 }
 
 # A scope's groups in sidebar order, each with the entry ids of the local Code chats filed in
@@ -793,11 +950,15 @@ function Save-SidebarPlan($Plan) {
 # match a target state: groups to create, chats to file or take out of a group, groups to
 # delete, chats to pin or unpin, in the order to make them. A chat created after the plan was
 # made is left as it is, and so is a chat the tools refuse (an archived chat, a routine's run).
-# Filing a pinned chat in a group unpins it, so every pin comes after the moves.
+# A chat the sidebar shows under another is never named: the app moves a family only whole, so it
+# goes wherever the chat at the top of its family goes. Filing a pinned chat in a group unpins it,
+# so every pin comes after the moves.
 function Get-SidebarCalls($Target, $Now, $Entries, [long]$MadeMs) {
   $calls = New-Object System.Collections.Generic.List[object]
   $notes = New-Object System.Collections.Generic.List[string]
   $result = [pscustomobject]@{ Calls = $calls; Notes = $notes; Blocked = $null }
+  $rootOf = Get-ChatFamilies $Entries
+  $following = New-Object 'System.Collections.Generic.HashSet[string]'
   $canChange = {
     param([string]$id)
     $e = $null
@@ -833,6 +994,7 @@ function Get-SidebarCalls($Target, $Now, $Entries, [long]$MadeMs) {
         $at = $null
         if ($groupOf.TryGetValue($id, [ref]$at) -and ($at -ceq $g.Name)) { continue }
         if ($targetOf[$id] -cne $g.Name) { continue }
+        if ($rootOf.ContainsKey($id)) { [void]$following.Add($id); continue }
         $need.Add($id)
       }
       if ($need.Count -eq 0) { continue }
@@ -856,6 +1018,7 @@ function Get-SidebarCalls($Target, $Now, $Entries, [long]$MadeMs) {
         }
         if (-not $Entries.ById.ContainsKey($id)) { continue }
         if (-not (& $canChange $id)) { $staying[$g.Name] = $staying[$g.Name] + 1; continue }
+        if ($rootOf.ContainsKey($id)) { [void]$following.Add($id); continue }
         if (& $isNewer $id) { $newer++; $staying[$g.Name] = $staying[$g.Name] + 1; continue }
         $leave.Add($id)
       }
@@ -872,6 +1035,7 @@ function Get-SidebarCalls($Target, $Now, $Entries, [long]$MadeMs) {
       $calls.Add([pscustomobject]@{ Tool = 'delete_group'; Group = $g.Name; Sessions = @(); Session = $null; Pinned = $null })
     }
     if ($newer -gt 0) { $notes.Add(('{0} grouped chat(s) were created after the plan was made and are left where they are.' -f $newer)) }
+    if ($following.Count -gt 0) { $notes.Add(('{0} chat(s) are shown under the chat they were started from and go wherever it goes, so they are not filed on their own.' -f $following.Count)) }
   }
   if ($null -ne $Target.Pinned) {
     $want = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -934,7 +1098,8 @@ $sidebarLegend = @(
   '  "group" is a group''s name: pass the id list_groups gives for that name, as group_id.',
   '  A "group" of null means Ungrouped: pass section_id "sessions" and leave group_id out. A null in group_id can reach the tool as the text "null", which it refuses.',
   '  create_group: skip it when list_groups already shows a group with exactly that name.',
-  '  delete_group: its chats are already out of it by then; deleting a group never deletes a chat.'
+  '  delete_group: its chats are already out of it by then; deleting a group never deletes a chat.',
+  '  move_sessions moves a chat together with the chats shown under it. If the app refuses a move because a chat is nested under another, make the call again without that chat: it goes wherever that other chat goes.'
 )
 
 # --- the app's data folder, found as the app finds it (derived; the package suffix is never
@@ -1257,7 +1422,7 @@ if ($Undo) {
     }
     Restore-RunFiles $runBackup
     Remove-Item -LiteralPath $runBackup -Recurse -Force
-    Write-Host ("Put back every file run {0} changed (chat entries it moved to another folder, and the config file if it filled it in) exactly as it was before." -f (Split-Path -Leaf $runBackup))
+    Write-Host ("Put back every file run {0} changed (chat entries it moved to another folder or linked, and the config file if it filled it in) exactly as it was before." -f (Split-Path -Leaf $runBackup))
   }
   if ($manifest) {
     $removed = 0
@@ -1320,6 +1485,8 @@ if ($sourceAccount) { $sourceAccountId = $sourceAccount.AccountUuid }
 $skip = '^(?:' + ((@($builtInSkip) + @($userConfig.TitleSkipPrefixes) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
 $created = New-Object System.Collections.Generic.List[string]
 $pendingTranscripts = New-Object 'System.Collections.Generic.HashSet[string]'
+# each entry this run creates (in a dry run, each it would create), with its twin, for the links
+$newEntries = New-Object System.Collections.Generic.List[object]
 $tally = @{ twin = 0; custom = 0; ai = 0; user = 0; date = 0 }
 $dateTally = @{ twin = 0; record = 0; file = 0 }
 $folderTally = @{ twin = 0; stored = 0; record = 0; root = 0 }
@@ -1476,6 +1643,7 @@ foreach ($cli in (@($copiesById.Keys) | Sort-Object)) {
       if ($archived) { $twinTally.archived++ }
       if ($lineageJson) { $twinTally.lineage++ }
       [void]$pendingTranscripts.Add($cli)
+      $newEntries.Add([pscustomobject]@{ Id = 'new:' + $cli; Path = $null; Transcript = $cli; Json = $null; Twin = $twin; Archived = $archived; Title = $title })
       if ($samples.Count -lt 22) { $samples.Add(('[{0,-6}][{1} {2}] {3}' -f $src, $model, $effort, $title)) }
       continue
     }
@@ -1487,10 +1655,116 @@ foreach ($cli in (@($copiesById.Keys) | Sort-Object)) {
     $outPath = Join-Path $orgDir ($sid + '.json')
     [System.IO.File]::WriteAllText($outPath, $json, $utf8)
     $created.Add($outPath)
+    $newEntries.Add([pscustomobject]@{ Id = $sid; Path = $outPath; Transcript = $cli; Json = $json; Twin = $twin; Archived = $archived; Title = $title })
     $dateTally[$dateSrc]++; $folderTally[$folderSrc]++
     if ($archived) { $twinTally.archived++ }
     if ($lineageJson) { $twinTally.lineage++ }
   } catch { Write-Host ("skip {0}: {1}" -f $cli, $_.Exception.Message) }
+}
+
+# --- links: a chat here takes the link of its twin in another account when it has no link of
+# its own: each entry this run created, and, while Claude is fully quit, each entry this account
+# listed before the run. The app keeps the entries it has loaded in memory and rewrites them
+# while it runs; an entry this run created is new to it ---
+$runDir = Join-Path $backupsRoot $stamp
+$hereByTranscript = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]'
+$addHere = {
+  param([string]$Transcript, $Item)
+  if (-not $hereByTranscript.ContainsKey($Transcript)) { $hereByTranscript[$Transcript] = New-Object System.Collections.Generic.List[object] }
+  $hereByTranscript[$Transcript].Add($Item)
+}
+$listedBefore = New-Object System.Collections.Generic.List[object]
+foreach ($pair in $entriesByTranscript.GetEnumerator()) {
+  foreach ($item in $pair.Value) {
+    if ($item.Account -ne $acct -or $item.Org -ne $org) { continue }
+    $id = Get-JsMember $item.Entry 'sessionId'
+    if (-not ($id -is [string]) -or -not $id) { $id = [System.IO.Path]::GetFileNameWithoutExtension($item.Path) }
+    $here = [pscustomobject]@{ Id = $id; Path = $item.Path; Transcript = $pair.Key; Entry = $item.Entry; Archived = ((Get-JsMember $item.Entry 'isArchived') -eq $true); Title = [string](Get-JsMember $item.Entry 'title') }
+    & $addHere $pair.Key $here
+    $listedBefore.Add($here)
+  }
+}
+foreach ($made in $newEntries) { & $addHere $made.Transcript $made }
+# the entry here for a chat, by its transcript: the one that is not archived, else the archived
+# one; none when two could be meant
+$idHere = {
+  param([string]$Transcript)
+  $list = $null
+  if (-not $hereByTranscript.TryGetValue($Transcript, [ref]$list)) { return $null }
+  $pool = @($list | Where-Object { -not $_.Archived })
+  if ($pool.Count -eq 0) { $pool = $list.ToArray() }
+  if ($pool.Count -eq 1) { return $pool[0].Id }
+  return $null
+}
+$linkTally = @{ New = 0; Listed = 0; Parent = 0; Shape = 0 }
+$newLinks = New-Object System.Collections.Generic.List[object]
+$listedLinks = New-Object System.Collections.Generic.List[object]
+foreach ($made in $newEntries) {
+  if (-not $made.Twin) { continue }
+  $link = Get-TwinLink $made.Twin $allEntries.ById $idHere $made.Id
+  if ($link.Problem) { $linkTally[$link.Problem]++; continue }
+  if ($link.Fields) { $newLinks.Add([pscustomobject]@{ Path = $made.Path; Json = $made.Json; Fields = $link.Fields; Title = $made.Title }) }
+}
+foreach ($here in $listedBefore) {
+  if (Test-EntryLinked $here.Entry) { continue }
+  $candidates = $null
+  [void]$entriesByTranscript.TryGetValue($here.Transcript, [ref]$candidates)
+  $twin = Select-Twin $candidates $acct $sourceAccountId
+  if (-not $twin) { continue }
+  $link = Get-TwinLink $twin $allEntries.ById $idHere $here.Id
+  if ($link.Problem) { $linkTally[$link.Problem]++; continue }
+  if ($link.Fields) { $listedLinks.Add([pscustomobject]@{ Path = $here.Path; Fields = $link.Fields; Title = $here.Title }) }
+}
+# the links this run wrote into entries it did not create, by path, for the folder step's check
+$linkedFields = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::OrdinalIgnoreCase)
+$linksBlocked = $null
+$linksRolledBack = $false
+$backupShown = $false
+if (-not $DryRun) {
+  foreach ($l in $newLinks) {
+    try {
+      $entry = ConvertFrom-JsJson $l.Json
+      foreach ($name in @($l.Fields.Keys)) { $entry[$name] = $l.Fields[$name] }
+      Write-TextFileAtomic $l.Path (ConvertTo-JsJson $entry)
+      if (-not (Test-LinkWritten (ConvertFrom-JsJson $l.Json) (ConvertFrom-JsJson (Read-TextFile $l.Path)) $l.Fields)) { throw 'it read back wrong' }
+      $linkTally.New++
+    } catch {
+      [System.IO.File]::WriteAllText($l.Path, $l.Json, $utf8)
+      Write-Host ('Links: "{0}" was created without its link, whose write did not check out ({1}).' -f $l.Title, $_.Exception.Message)
+    }
+  }
+  if ($listedLinks.Count -gt 0) {
+    $activity = Get-AppActivity (Get-AppProgramRoots $appData.PackageFamilies $unpackagedInstall) @($leveldbDir)
+    if ($activity.Count -gt 0) { $linksBlocked = $activity -join '; ' }
+    else {
+      Backup-RunFiles $runDir @($listedLinks | ForEach-Object { $_.Path }) $null
+      Write-Host "Backup  : $runDir"
+      $backupShown = $true
+      try {
+        foreach ($l in $listedLinks) {
+          $entry = ConvertFrom-JsJson (Read-TextFile $l.Path)
+          foreach ($name in @($l.Fields.Keys)) { $entry[$name] = $l.Fields[$name] }
+          Write-TextFileAtomic $l.Path (ConvertTo-JsJson $entry)
+        }
+        $backupDir = Join-Path $runDir 'entries'
+        foreach ($l in $listedLinks) {
+          $was = ConvertFrom-JsJson (Read-TextFile (Join-Path $backupDir (Split-Path -Leaf $l.Path)))
+          $is = ConvertFrom-JsJson (Read-TextFile $l.Path)
+          if (-not (Test-LinkWritten $was $is $l.Fields)) { throw "the chat entry $(Split-Path -Leaf $l.Path) read back wrong" }
+        }
+        foreach ($l in $listedLinks) { $linkedFields[$l.Path] = $l.Fields }
+        $linkTally.Listed = $listedLinks.Count
+      } catch {
+        $failure = $_.Exception.Message
+        Write-Host "Links: the write did not check out ($failure). Putting back the backed-up entries..."
+        Restore-RunFiles $runDir
+        Remove-Item -LiteralPath $runDir -Recurse -Force
+        $linksRolledBack = $true
+        $backupShown = $false
+        Write-Host 'Links: rolled back; every chat entry this account listed before the run is exactly as it was.'
+      }
+    }
+  }
 }
 
 $datesLine = "  dates: {0} from the same chat's entry in another account, {1} from the transcript's last record, {2} from the transcript file's times" -f $dateTally.twin, $dateTally.record, $dateTally.file
@@ -1526,11 +1800,22 @@ if ($DryRun) {
   Write-Host ("Org dir now has {0} entries." -f (Get-ChildItem -LiteralPath $orgDir -Filter *.json -File).Count)
 }
 foreach ($warning in $copyWarnings) { Write-Host $warning }
+if ($DryRun) {
+  $linkCount = $newLinks.Count + $listedLinks.Count
+  if ($linkCount -gt 0) { Write-Host ("Links: would show {0} chat(s) under the chat they were started from, as the same chat's entry in another account is shown: {1} new, and {2} already listed here, which a run links only while Claude is fully quit." -f $linkCount, $newLinks.Count, $listedLinks.Count) }
+  else { Write-Host 'Links: none to add.' }
+} else {
+  $linkCount = $linkTally.New + $linkTally.Listed
+  if ($linkCount -gt 0) { Write-Host ("Links: {0} chat(s) are now shown under the chat they were started from, as the same chat's entry in another account is: {1} new, and {2} already listed here." -f $linkCount, $linkTally.New, $linkTally.Listed) }
+  if ($linksBlocked) { Write-Host ("Links: {0} chat(s) already listed here were not linked, because Claude is still running ({1}). Quit it fully, including from the system tray, and run this script again to link them." -f $listedLinks.Count, $linksBlocked) }
+  if ($linkCount -eq 0 -and -not $linksBlocked -and -not $linksRolledBack) { Write-Host 'Links: none to add.' }
+}
+if ($linkTally.Parent) { Write-Host ("Links: {0} chat(s) were started from a chat that has no entry here, so they stay at the top level." -f $linkTally.Parent) }
+if ($linkTally.Shape) { Write-Host ("Links: {0} chat(s) are linked in a form this script does not know, so they stay at the top level." -f $linkTally.Shape) }
 
 # --- groups, pins and folders: work out how this account's become an exact copy of the
 # configured account's. Folders are set here, in the chat entries. Groups and pins are left to
 # the app's own sidebar tools: this saves the plan, and -Sidebar lists the calls ---
-$runDir = Join-Path $backupsRoot $stamp
 if (-not $userConfig.CopyGroupsFrom) {
   Write-Host 'Groups, pins and folders: nothing planned (session-restore.config.json names no account in copyGroupsFromEmail).'
 } else {
@@ -1753,7 +2038,7 @@ if (-not $userConfig.CopyGroupsFrom) {
         Write-Host ("Folders: not changed, because Claude is still running ({0}). Quit it fully, including from the system tray, and run this script again to move those chats." -f ($activity -join '; '))
       } else {
         Backup-RunFiles $runDir @($folderEdits | ForEach-Object { $_.Path }) $null
-        Write-Host "Backup  : $runDir"
+        if (-not $backupShown) { Write-Host "Backup  : $runDir" }
         try {
           foreach ($edit in $folderEdits) {
             $entry = ConvertFrom-JsJson (Read-TextFile $edit.Path)
@@ -1766,8 +2051,14 @@ if (-not $userConfig.CopyGroupsFrom) {
           foreach ($edit in $folderEdits) {
             $was = ConvertFrom-JsJson (Read-TextFile (Join-Path $backupDir (Split-Path -Leaf $edit.Path)))
             $is = ConvertFrom-JsJson (Read-TextFile $edit.Path)
-            $good = Test-JsChangeConfined $was $is @((Get-JsPath '$' 'cwd'), (Get-JsPath '$' 'originCwd')) ([ref]$unexpected)
+            # the backup is the entry as it was before the run, so a link this run gave it is
+            # allowed too, and must still be there as written
+            $allowed = @((Get-JsPath '$' 'cwd'), (Get-JsPath '$' 'originCwd'))
+            $linked = $null
+            if ($linkedFields.TryGetValue($edit.Path, [ref]$linked)) { $allowed += @($linkPaths | ForEach-Object { Get-JsPath '$' $_ }) }
+            $good = Test-JsChangeConfined $was $is $allowed ([ref]$unexpected)
             if ($good -and (-not ($is['cwd'] -ceq $edit.Cwd) -or -not ($is['originCwd'] -ceq $edit.Origin))) { $good = $false }
+            if ($good -and $linked) { foreach ($name in @($linked.Keys)) { if (-not (Test-JsKey $is $name) -or ((ConvertTo-JsJson $is[$name]) -cne (ConvertTo-JsJson $linked[$name]))) { $good = $false } } }
             if (-not $good) { throw "the chat entry $(Split-Path -Leaf $edit.Path) read back wrong" }
           }
           Write-Host ("Folders: moved {0} chat(s)." -f $folderEdits.Count)
@@ -1777,6 +2068,7 @@ if (-not $userConfig.CopyGroupsFrom) {
           Restore-RunFiles $runDir
           Remove-Item -LiteralPath $runDir -Recurse -Force
           Write-Host 'Folders: rolled back; every chat entry is exactly as it was.'
+          if ($linkedFields.Count -gt 0) { Write-Host ('Links: the {0} chat(s) already listed here that were linked above are therefore not linked; run this script again with Claude fully quit to link them.' -f $linkedFields.Count) }
         }
       }
     }

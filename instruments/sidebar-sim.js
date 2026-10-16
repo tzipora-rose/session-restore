@@ -38,6 +38,13 @@
 //   - a move_sessions that files a chat in a group sets that group's section to collapsed false
 //     (read, not seen).
 // An account with no sections yet gets the built-in pinned, routines and sessions first.
+// It moves chats as the app does with families (read in desktop app 2.37337.1.0, app-families.js):
+// a chat the sidebar shows under another is refused, with nothing moved, unless the chat at the
+// top of its family is named in the same call; a move files the chat at the top of the named
+// chat's family by its own key alone, and the chats under it show under it wherever it goes,
+// whatever keys of their own they hold; a chat under another named with its top loses its own
+// key; and only the chat named, and the chat at the top when it is not the one named and moves,
+// lose a pin when moved into a group.
 // Usage: node sidebar-sim.js <sandbox profile dir> <receiving key> <calls file> [--skip <n>]
 //   --skip <n>   leave call number n unmade (to see the next listing ask for it again)
 // It writes only into the sandbox: the settings file, and sim-empty-groups.json beside the
@@ -45,6 +52,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { families } = require('./app-families.js');
 const args = process.argv.slice(2);
 const si = args.indexOf('--skip');
 const skip = si === -1 ? null : parseInt(args.splice(si, 2)[1], 10);
@@ -60,6 +68,12 @@ const prefsPath = path.join(store, 'claude_desktop_config.json');
 const emptyPath = path.join(path.dirname(profile), 'sim-empty-groups.json');
 const [account, org] = key.split('/');
 const entryOf = id => { try { return JSON.parse(fs.readFileSync(path.join(store, 'claude-code-sessions', account, org, id + '.json'), 'utf8')); } catch { return null; } };
+// the account's families, as the app sees them: each chat under another, with the chat at the top
+const orgDir = path.join(store, 'claude-code-sessions', account, org);
+const topOf = families(fs.readdirSync(orgDir).filter(n => /^local_.*\.json$/.test(n)).map(n => {
+  let e = null; try { e = JSON.parse(fs.readFileSync(path.join(orgDir, n), 'utf8')); } catch { /* unreadable */ }
+  return { id: (e && e.sessionId) || n.replace(/\.json$/, ''), e };
+}));
 
 const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
 const ep = prefs.preferences.epitaxyPrefs;
@@ -133,15 +147,23 @@ for (const call of file.calls) {
     showCustomGroups();
   } else if (call.tool === 'move_sessions') {
     const gid = a.group === null ? null : byName(a.group).id;
+    for (const id of a.session_ids) {
+      const top = topOf.get(id);
+      if (top !== undefined && !a.session_ids.includes(top)) throw new Error(`Session ${id} is nested under ${top}, and nested sessions move with their parent. Nothing was moved. Call move_sessions again naming ${top} (you may include ${id}) to move them together.`);
+    }
     let moved = 0;
+    const put = id => {
+      leave(id);
+      if (gid !== null) { scope.assignments['code:' + id] = gid; (scope.order[gid] = scope.order[gid] || []).push('code:' + id); }
+    };
     for (const id of a.session_ids) {
       usable(id);
-      const changed = (scope.assignments['code:' + id] || null) !== gid;
-      leave(id);
+      const top = topOf.has(id) ? topOf.get(id) : id;
+      const changed = (scope.assignments['code:' + top] || null) !== gid;
+      put(top);
+      if (top !== id && scope.assignments['code:' + id] !== undefined) leave(id);
       if (gid !== null) {
-        scope.assignments['code:' + id] = gid;
-        (scope.order[gid] = scope.order[gid] || []).push('code:' + id);
-        const p = pins.indexOf(id); if (p !== -1) { pins.splice(p, 1); moved++; continue; }
+        for (const lose of top === id ? [id] : [id, top]) { const p = pins.indexOf(lose); if (p !== -1 && (lose === id || changed)) { pins.splice(p, 1); moved++; } }
       }
       if (changed) moved++;
     }

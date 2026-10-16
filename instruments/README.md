@@ -55,8 +55,9 @@ what it does, for running one by hand.
    `claude-code-sessions` give both. The run's data is in `<profile>\.session-restore\`.
    `node verify-entries.js <profile> <copy>\created-entries-<stamp>.txt <receiving key> <source key> <sandbox>\fingerprints-at-build.json [<data>\backups\<stamp>]`
    `node verify-plan.js <profile> <data>\sidebar-plan.json <source key> <receiving key>`
-   The backup folder exists only when the run moved a chat to another folder or filled in the
-   config. A run that planned nothing (no account configured, or the configured one was the
+   For a run that created no entry, pass `none` for the manifest. The backup folder exists only
+   when the run moved a chat to another folder, linked a chat already listed, or filled in the
+   config; the run prints it (`Backup  : <folder>`). A run that planned nothing (no account configured, or the configured one was the
    receiving one or could not be found) is checked with `verify-entries.js` alone, with
    `none/none` as the source key.
 4. Make the calls. A sandbox has no running app, so `sidebar-sim.js` stands in for the app's
@@ -107,15 +108,21 @@ app's tool refused, and every pass was clean.
   files parse in Windows PowerShell 5.1 and are ASCII; the shared reads and
   `lib\Transcripts.ps1`), `desktop-app` (`check-desktop-app.js` and the faults it must catch),
   `run` (a run, its entries and plan, what it says of the transcripts it found, the calls
-  forward with one left unmade, and back, `-Undo`), `calls`, `source-by-id`,
+  forward with one left unmade, and back, `-Undo`), `links` (the links between chats, on cases
+  `stage-sandbox.js` stages whatever this computer's data holds: a chain three chats long whose
+  lower two the run creates, a chat already listed, a fork, a detached chat, a chat linked here
+  already, a chat whose parent the source has no entry for; each case read back, the entries,
+  the faults `verify-entries.js` must catch, the calls with the families in place, `-Undo`),
+  `calls`, `source-by-id`,
   `source-from-settings`, `source-from-list`, `as-source`, `config`, `list`, `export-import`,
   `sections`, `left-alone`, `unpackaged` (the app's data where an unpackaged install keeps it,
   in `AppData\Roaming\Claude`: a run there, its entries, plan and calls, `-Undo`; a package
   folder holding no data folder; both places with Code sessions; the packaged app's data
   without Code sessions; no data at all) and `app-running` (a stand-in for the app's program,
   a copy of `ping.exe` running from the sandbox's `AppData\Local\AnthropicClaude`, makes `-Undo`
-  of a run that moved chats refuse and a run leave a chat's folder alone, each going ahead once
-  it stops). Each pass builds its sandboxes from this computer's data and removes them, runs
+  of a run that moved chats refuse, and a run leave a chat's folder alone and link only the
+  chats it creates, each going ahead once it stops). Each pass builds its sandboxes from this
+  computer's data and removes them, runs
   its own scratch copy of the tool, reads what it expects (group names, labels, the sections)
   from the sandbox's data, and has `make-faults.js` make the faults the checkers and
   `check-sidebar-calls.js` must catch. One more pass, `explorer`, runs only when named
@@ -127,7 +134,8 @@ app's tool refused, and every pass was clean.
   <names>` runs some; `--keep` keeps the work folder, which is kept anyway when something is
   wrong. PROOF INCOMPLETE names what this data could not test. It needs Node and Windows
   PowerShell 5.1, and accounts with groups and pins; its header says what each pass stages.
-  Made 2026-10-08 from the drivers of that day's proofs; the last four passes added 2026-10-09.
+  Made 2026-10-08 from the drivers of that day's proofs; the last four passes added 2026-10-09,
+  and `links` 2026-10-15.
 - `check-desktop-app.js` — checks `lib\DesktopApp.ps1` of a given tool folder by running its
   functions in Windows PowerShell: where the app keeps its data, on profiles it builds for each
   layout; whether the script was started to run and end, on command lines written by hand
@@ -140,8 +148,16 @@ app's tool refused, and every pass was clean.
   elevated while the app is, it reports it as not tested. `node check-desktop-app.js <tool folder>`.
 - `stage-sandbox.js` — stages states in a sandbox for `prove-tool.js`, or by hand: an account's
   groups and pins taken out, a group with no chat, a chat filed, pinned or made newer than a
-  plan, a list without pins, the scratch config naming an account by its email or its id. It
+  plan, a list without pins, the scratch config naming an account by its email or its id; for
+  `prove-tool.js`, the cases of links (chat entries edited and set aside, with a way to put them
+  back) and the fingerprints of a staged store, in the form `new-sandbox.ps1` writes them. It
   writes nothing outside the sandboxes' folder. Its header lists the commands.
+- `app-families.js` — the desktop app's rule for which chats its sidebar shows under another
+  and which chat is at the top of each family, written from the app's code (2.37337.1.0) for
+  the instruments, sharing no code with the script: `sidebar-sim.js` refuses and files chats
+  with it as the app does, and `verify-sidebar.js`, `check-sidebar-calls.js` and
+  `make-faults.js` leave chats under another out of what they compare or choose. Added
+  2026-10-15.
 - `make-faults.js` — makes one fault at a time in a checker's input (a plan, a list or export,
   the settings file, a chat entry) or in a throwaway copy of the script or of
   `lib\DesktopApp.ps1`, and checks that it is
@@ -159,9 +175,13 @@ app's tool refused, and every pass was clean.
   entries and transcripts; each new entry has its twin's title, model, effort, archived state
   and earlier transcripts, holds no other field, and is in the default permission mode; each
   existing entry whose twin in the source account names another folder moved there unless a rule
-  forbids it; and every entry file the run neither created nor backed up is as the sandbox was
-  built. Which transcripts belong to an entry's chat is worked out here from the desktop app's
-  own rules (2.19675.0.0), not from the script.
+  forbids it; every entry file the run neither created nor backed up is as the sandbox was
+  built; and each entry here that had no link of its own carries its twin's, each id in it
+  turned into the receiving account's entry for the same chat, or none when that cannot be made,
+  while an entry that had a link keeps it. With `--app-running`, no entry listed before the run
+  gained a link or moved. Its manifest argument is `none` for a run that created no entry. Which
+  transcripts belong to an entry's chat is worked out here from the desktop app's own rules
+  (2.19675.0.0), not from the script.
 - `verify-plan.js` — checks a run's sidebar plan: it names the two accounts; its groups are the
   source's, in order, each with exactly the receiving account's entries for the chats the source
   filed in it; its pins are the entries for the source's pinned chats; and it records the
@@ -175,7 +195,11 @@ app's tool refused, and every pass was clean.
 - `sidebar-sim.js` — stands in for the app's sidebar tools in a sandbox: makes the calls
   `-Sidebar` listed in the sandbox's copy of the app's settings file, the way the app was seen
   to make them, refuses what the tools refuse, and changes the receiving account's sidebar
-  sections the way the app does (below). `--skip <n>` leaves one call unmade. It refuses to run
+  sections the way the app does (below). It moves chats as the app does with families
+  (`app-families.js`): it refuses, moving nothing, a chat under another named without the chat
+  at the top of its family; a move files the chat at the top by its own key alone, the chats
+  under it keeping theirs; and a chat under another named with its top loses its own key.
+  `--skip <n>` leaves one call unmade. It refuses to run
   on anything but a sandbox. `sidebar-sim-fixture.json` holds the sections the app wrote for one
   account when two groups were created and filled (desktop app 2.26454.2.0, 2026-10-08), group
   ids and names replaced; `prove-tool.js` compares the stand-in's sections with it.
@@ -183,7 +207,8 @@ app's tool refused, and every pass was clean.
   the settings file are what the plan aims at (`desired` or `before`), or, when the plan leaves
   the groups alone, that they and their sections were left as they were; that every other
   account's pins are as they were, that the account's sidebar sections are in step with its
-  groups (below), and that nothing else in the file changed.
+  groups (below), and that nothing else in the file changed. A chat shown under another goes
+  wherever its family goes, so it is left out of the groups compared, not of the pins.
 - `verify-list.js` — checks the list of an account's groups and pinned chats the script saves for
   a switch (`sidebar-list-<account>.json` in the profile's `.session-restore\`), or an export
   (`--file <file>`): it names the account and its org, holds the groups of the app's settings
@@ -191,11 +216,14 @@ app's tool refused, and every pass was clean.
   transcripts of the account's pinned chats in the pin list's order, and no half-written file is
   left beside it. It reads a sandbox's profile or the real one.
 - `check-sidebar-calls.js` — checks the calls `-Sidebar` lists against calls written out by
-  hand, in eleven cases it stages in a sandbox: an empty sidebar, groups that exist, an archived
+  hand, in twelve cases it stages in a sandbox: an empty sidebar, groups that exist, an archived
   chat, a group the plan lacks, a chat made after the plan, a pinned chat that is filed, more
   than 100 chats, a part of the plan left out, two groups of one name, a sidebar that matches
-  (with `-Back`, and a change after the plan was applied), and a plan for another account or
-  none. It puts the sandbox's settings file and plan back when it ends.
+  (with `-Back`, and a change after the plan was applied), a plan for another account or none,
+  and chats under another (a side session, its own child, a detached chat, a side session under
+  an archived chat, a chat under an archived chat it does not attach through), which no call
+  names. It chooses no chat under another for the first eleven. It puts the sandbox's settings
+  file, plan and the entries it staged back when it ends.
 - `check-shared-textread.ps1` — checks that `Read-TextFile` in a tool folder's script reads a
   file another handle has open for writing, and leaves it free to be replaced. Its control,
   `[System.IO.File]::ReadAllText`, must fail the first case, or the check fails. It works on a

@@ -31,8 +31,11 @@
 // A plan that leaves the groups alone needs the calls to have left them alone too: the groups
 // holding the chats the plan covers are those of before the calls, each with the same chats, and
 // every group section there before is still there under its name (an empty group shows only so).
+// A chat the sidebar shows under another goes wherever the chat at the top of its family goes
+// (app-families.js), so it is left out of the comparison of groups, though not of pins.
 const fs = require('fs');
 const path = require('path');
+const { families } = require('./app-families.js');
 const [profile, planPath, aim, referencePath] = process.argv.slice(2);
 if (!referencePath || !['desired', 'before'].includes(aim)) { console.error('usage: node verify-sidebar.js <profile> <plan file> <desired|before> <settings file before the calls>'); process.exit(2); }
 let fails = 0;
@@ -49,32 +52,36 @@ const store = path.join(pk, hits[0], 'LocalCache', 'Roaming', 'Claude');
 const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
 const key = plan.receiving.accountUuid + '/' + plan.receiving.organizationUuid;
 const dir = path.join(store, 'claude-code-sessions', plan.receiving.accountUuid, plan.receiving.organizationUuid);
-const mine = new Map();
+const mine = new Map(), read = [];
 for (const f of fs.readdirSync(dir).filter(n => /^local_.*\.json$/.test(n))) {
   let e; try { e = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { continue; }
   mine.set(e.sessionId || f.replace(/\.json$/, ''), { changeable: e.isArchived !== true && !e.scheduledTaskId, newer: typeof e.createdAt === 'number' && e.createdAt > plan.madeAtMs });
+  read.push({ id: e.sessionId || f.replace(/\.json$/, ''), e });
 }
+const nested = families(read);
 const now = JSON.parse(fs.readFileSync(path.join(store, 'claude_desktop_config.json'), 'utf8'));
 const ref = JSON.parse(fs.readFileSync(referencePath, 'utf8'));
 const ep = now.preferences.epitaxyPrefs, rep = ref.preferences.epitaxyPrefs;
 const scope = (ep['dframe-group-scopes'] || {})[key] || { groups: [], assignments: {} };
 const target = plan[aim];
-// chats the tools cannot change, and chats made after the plan, are outside what the plan asks
+// chats the tools cannot change, and chats made after the plan, are outside what the plan asks;
+// a chat under another is outside what it asks of groups
 const inPlay = id => mine.has(id) && mine.get(id).changeable && !mine.get(id).newer;
+const inPlayGroups = id => inPlay(id) && !nested.has(id);
 const refScope = (rep['dframe-group-scopes'] || {})[key] || { groups: [], assignments: {} };
 // the groups of a scope that hold chats the plan covers, by group id, each with those chats
 const filedById = s => {
   const m = new Map();
   for (const g of s.groups || []) {
-    const sessions = Object.keys(s.assignments || {}).filter(k => s.assignments[k] === g.id && k.startsWith('code:')).map(k => k.slice(5)).filter(inPlay);
+    const sessions = Object.keys(s.assignments || {}).filter(k => s.assignments[k] === g.id && k.startsWith('code:')).map(k => k.slice(5)).filter(inPlayGroups);
     if (sessions.length) m.set(g.id, { name: g.name, sessions });
   }
   return m;
 };
 
 if (target.groups !== null) {
-  const want = target.groups.map(g => ({ name: g.name, sessions: g.sessions.filter(inPlay) })).filter(g => g.sessions.length);
-  const have = scope.groups.map(g => ({ name: g.name, sessions: Object.keys(scope.assignments).filter(k => scope.assignments[k] === g.id && k.startsWith('code:')).map(k => k.slice(5)).filter(inPlay) })).filter(g => g.sessions.length);
+  const want = target.groups.map(g => ({ name: g.name, sessions: g.sessions.filter(inPlayGroups) })).filter(g => g.sessions.length);
+  const have = scope.groups.map(g => ({ name: g.name, sessions: Object.keys(scope.assignments).filter(k => scope.assignments[k] === g.id && k.startsWith('code:')).map(k => k.slice(5)).filter(inPlayGroups) })).filter(g => g.sessions.length);
   check(sameSet(have.map(g => g.name), want.map(g => g.name)), `the account's groups with chats are the plan's: ${want.map(g => `"${g.name}" (${g.sessions.length})`).join(', ') || 'none'}`);
   let ok = true;
   for (const g of want) { const h = have.find(x => x.name === g.name); if (!h || !sameSet(h.sessions, g.sessions)) { ok = false; console.log(`       "${g.name}": the plan has ${g.sessions.length}, the settings file ${h ? h.sessions.length : 0}`); } }

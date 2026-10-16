@@ -9,8 +9,10 @@ One script, `session-restore.ps1`, for the Claude desktop app on Windows. It doe
    now. Its natural moment is right after an **account switch** (the sidebar empties because the
    index is account-scoped); it also resurrects chats lost to an app reinstall or sidebar aging.
    Each entry it creates is modelled on the same chat's entry in another account: its dates,
-   folder, title, model, effort, archived state and earlier transcripts. A chat no other account
-   lists is built from its transcript. A chat's earlier transcripts get no entry of their own.
+   folder, title, model, effort, archived state, earlier transcripts, and the chat it was started
+   from (see "Links between chats"). A chat no other account lists is built from its transcript.
+   A chat's earlier transcripts get no entry of their own. With the app fully quit, a chat the
+   signed-in account already lists, and that has no link of its own, gets the link its twin has.
    These are the sessions of the app's Code tab, whose transcripts are on this computer. The
    chats of its Chat tab are kept on Anthropic's servers under the account that made them: the
    script cannot see or move them, and only signing in to that account shows them.
@@ -105,9 +107,10 @@ calls, so the session only has to make them.
 | the sidebar's own saved state | browser storage key `dframe-store` → `state.customGroupsByScope`, per `"<accountUuid>/<orgUuid>"` | the source account's groups, and the signed-in account's groups before a run. Read through a private copy of the `Local Storage\leveldb` folder |
 | the saved form of the groups | `claude_desktop_config.json` → `preferences.epitaxyPrefs["dframe-group-scopes"]` | the same, when the saved state does not hold the account; and, in `-Sidebar`, the signed-in account's groups as they are now. The app rewrites it within a second of a change. A group with no chats is not in it |
 | the pin list | `claude_desktop_config.json` → `preferences.epitaxyPrefs["starred-local-code-sessions"]` | pins. It is **one list for all accounts**: each account's sidebar shows the entries in it that belong to that account |
-| the chat entries | `claude-code-sessions\<accountUuid>\<orgUuid>\local_*.json` | which transcript each entry resumes, its folder, its title, whether it is archived |
+| the chat entries | `claude-code-sessions\<accountUuid>\<orgUuid>\local_*.json` | which transcript each entry resumes, its folder, its title, whether it is archived, and the chat it was started or forked from |
 
-It writes none of these but the chat entries: new ones, and the folder of existing ones.
+It writes none of these but the chat entries: new ones, and the folder and the links of existing
+ones.
 
 Checked against the desktop app 2.26454.2.0 on 2026-10-08. The web interface is downloaded, not
 shipped, and changes often; if it ever saves groups differently, the script says it does not
@@ -129,6 +132,39 @@ entry and its transcript have to agree:
 
 A transcript records the folder its chat began in, which may since have moved or gone, so the
 script never takes a folder from a transcript without checking that it exists.
+
+### Links between chats
+
+A chat a session started (a side session, a hand-off, a task a session started) and a chat forked
+from another are shown in the sidebar under the chat they came from, and the app moves them
+together with it. The entry of such a chat names the other chat by its entry id:
+`spawnedFrom.sessionId` for a chat a session started, `forkedFromSessionId` for a fork, beside
+`forkedAtMessageUuid`, the message it was forked at; `lineageDetached` marks a chat taken out
+from under the chat it came from. Entry ids differ between accounts, so a link copied as it is
+would name nothing in the receiving account, and the chat would show at the top level. The
+script copies the link from the chat's twin and turns each id in it into the id of this
+account's entry for the same chat, matched by transcript:
+
+- into each entry it creates;
+- with the app fully quit, into each entry here that has none of `spawnedFrom`,
+  `forkedFromSessionId` and `lineageDetached`. The app keeps the entries it has loaded in memory
+  and rewrites them while it runs, so a run with the app open leaves them alone and says how
+  many it left.
+
+An entry that has a link of its own is never changed, whatever its twin has: links are added,
+never taken away or replaced. A chat whose twin's link names a chat that has no entry here stays
+at the top level, and the run says how many. The rest of a link (`taskId`, `title`,
+`sideSession`, `name` and the like) is copied as it is. The notes a parent keeps of its side
+sessions, and the receipts of messages sent between sessions, are a running conversation's own
+state and are not copied.
+
+Which chat the sidebar shows a chat under is the app's rule, read in its code (desktop app
+2.37337.1.0), applied each time it loads an entry: none once `lineageDetached` is set; else the
+chat a side session or a hand-off was started from; else the chat it was forked from; else the
+chat that started it. A chat goes under that chat when it is listed and is not archived while
+the chat under it is not; a side session or a hand-off whose parent is archived goes under the
+nearest chat above it that is not. The plan follows the same rule (see "What an exact copy
+means").
 
 ## The two steps of a switch
 
@@ -202,7 +238,10 @@ Run `-Sidebar`. It prints the calls that are left, one per line, as a tool of
   `group_id` of null for Ungrouped, but a null a session puts there can reach the tool as the
   text `"null"`, which it takes for a group's id and refuses ("No custom group with that id");
   and it refuses a call whose `group_id` and `section_id` differ. A refused call changes
-  nothing;
+  nothing. A move takes the chats shown under the chats named along with them, and no call
+  names a chat shown under another: the app refuses one unless the chat at the top of its family
+  is in the same call. If the app refuses a move because a chat is nested under another, make
+  the call again without that chat: it goes wherever that other chat goes;
 - `delete_group {"group": <name>}` — by then its chats are out of it; deleting a group never
   deletes a chat;
 - `set_pinned {"session_id": ..., "pinned": true|false}`.
@@ -221,7 +260,12 @@ window has not reported them: call it again a moment later.
 - **Groups:** this account has a group for each of the source account's groups that holds a
   chat, under the same name; each chat is filed in the group its twin is in; chats the source
   account has not grouped end up ungrouped; a group here that the source lacks is deleted once
-  its chats are out of it.
+  its chats are out of it. A chat the sidebar shows under another chat here goes wherever the
+  chat at the top of its family goes, since the app moves a family only whole: it is not filed
+  on its own, and `-Sidebar` says how many such chats would otherwise have been. Such a chat can
+  hold a group key of its own, which an export lists. The calls never give it one, so after an
+  import it can lack a key the file lists, while it shows where it would, under the chat at the
+  top.
 - **Pins:** this account's pins become the twins of the source account's pins. Its own pins
   that the source has not pinned are unpinned. The source account's pins, and any other
   account's, are not touched.
@@ -380,6 +424,13 @@ plan had been applied, since chats filed or pinned afterwards differ from it by 
    script says so and leaves that entry as it is.
 9. **Writes one new index entry** per chat (`local_<guid>.json`), in the app's default
    permission mode. Choosing another mode for a chat is done in the app.
+10. **Links.** Once every new entry is written, each one whose twin is linked to another chat
+    gets the link, each id in it turned into this account's entry for the same chat, so a chat
+    can be linked to one created in the same run. Then, with the app fully quit, each entry this
+    account listed before the run that has no link of its own gets its twin's the same way (see
+    "Links between chats"). The output says how many were linked, how many were left because the
+    app is running, and how many stay at the top level because the chat they came from has no
+    entry here.
 
 Every read of a file the app or Claude Code may be writing lets it keep writing: transcripts,
 chat entries and the app's settings file are opened so that another program can still append
@@ -392,27 +443,30 @@ to them and replace them.
   `created-entries.txt` from the single-manifest version is honored as the oldest undo step.)
 - **The script never writes into the app's settings file, its browser storage or its IndexedDB.**
   It reads the browser storage through a private copy of the folder.
-- **Folders** are written only while the app is fully closed, since the app rewrites its chat
-  entries while it runs. The script counts the app as running when a process in the user's own
-  Windows session runs a program from the packaged app's install folder or from an unpackaged
-  install's `AppData\Local\AnthropicClaude\`, or when the lock file of its browser storage is
-  held, and says so when it leaves the folders alone. It reads each process's program with a
-  Windows call that also works for an app running with administrator rights when the console
-  is not. The packaged app's background service, CoworkVMService, runs from its install folder
-  all the time, in another session, and is not counted. The chat entries and the plan are made
-  either way.
-- **Backups first.** Before it moves a chat to another folder, and before it fills in the
-  config's account, it copies the file to `.session-restore\backups\<stamp>\` in the user
-  profile and checks the copy's SHA-256 against the original.
-- **Read-back check, automatic rollback.** After moving chats it reads every entry back; if one
-  differs from what it meant to write, or anything but its folder changed, it puts all the
-  backed-up entries back and says so.
+- **Folders, and the links of existing entries,** are written only while the app is fully
+  closed, since the app rewrites its chat entries while it runs. The script counts the app as
+  running when a process in the user's own Windows session runs a program from the packaged
+  app's install folder or from an unpackaged install's `AppData\Local\AnthropicClaude\`, or when
+  the lock file of its browser storage is held, and says so when it leaves the folders or links
+  alone. It reads each process's program with a Windows call that also works for an app running
+  with administrator rights when the console is not. The packaged app's background service,
+  CoworkVMService, runs from its install folder all the time, in another session, and is not
+  counted. The chat entries, with their links, and the plan are made either way.
+- **Backups first.** Before it moves a chat to another folder or gives an existing chat a link,
+  and before it fills in the config's account, it copies the file to
+  `.session-restore\backups\<stamp>\` in the user profile and checks the copy's SHA-256 against
+  the original. A file the run backs up twice keeps its first copy, the file as it was before
+  the run.
+- **Read-back check, automatic rollback.** After linking chats, and after moving chats, it reads
+  every entry back; if one differs from what it meant to write, or anything changed but its link
+  or its folder, it puts all the backed-up entries back and says so. A new entry whose link does
+  not read back right is written again without it.
 - **The plan holds the groups and pins as they were.** `-Sidebar -Back` lists the calls that
   put them back. Those calls are the app's own, like the calls that applied the plan.
 - **`-Undo`** reverses the newest run: it deletes that run's new entries, puts the backed-up
   files back exactly as they were (checked by SHA-256), and turns the run's plan around, so that
   `-Sidebar` then lists the calls back to the groups and pins as they were. It needs the app
-  closed when the run moved chats to another folder.
+  closed when the run moved chats to another folder or linked existing ones.
 - The app reads chat entries at start-up: **reopen it** to see new chats and moved ones.
 
 ## Files
@@ -551,6 +605,25 @@ The plan and the calls were checked on 2026-10-08, on copied profiles, against t
   passed again on this build, after the pass for a running app was corrected to take back its
   own runs before it compares the copied profile with its build: a run brings back every chat
   the account does not list, and that day the account lacked some.
+- **Links between chats** (2026-10-15 and 16, desktop app 2.37337.1.0, copied profiles). The
+  app's rule was read in its code: the fields that link a chat to another, how the sidebar puts
+  chats into families, and how a move treats a family. Signed in as one account, a run gave the
+  24 chats the other account shows under another chat the same links, each id turned into this
+  account's, and an independent script confirmed every one; `-Undo` put every entry back byte
+  for byte. A pass that stages its cases, whatever links the data holds (a chain of three chats
+  whose lower two the run created, a chat already listed, a fork, a detached chat, a chat linked
+  here already, a chat whose parent the other account has no entry for), found each as the
+  rules say, by a check of each case and by the independent script, and three faults in the
+  entries were each caught by the check meant for them. With a stand-in for the app running, a
+  run linked only the chats it created, and the others once it stopped. A case of the calls
+  (chats under another, a detached chat, a side session under an archived chat, a chat under an
+  archived chat it does not attach through) passed, and failed on the version before, which
+  named chats under another in its moves, as the app refused that night; four faults in the
+  script were each caught by it. The stand-in refuses and files as the app does with families,
+  so every pass that makes calls made them with the families in place. The whole proof: 311
+  checks, none wrong. Not tested: whether the app's background service, in another Windows
+  session, is left uncounted, which needs an elevated console (the app ran without
+  administrator rights that night), in `lib\DesktopApp.ps1`, which this change leaves as it was.
 
 The chat step as it is (earlier transcripts left out; title, model, effort, archived state
 and earlier transcripts taken from the twin; shared transcript reads) was checked on 2026-10-04

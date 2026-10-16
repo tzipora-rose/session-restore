@@ -21,12 +21,14 @@
 // the script with -Sidebar, and compares the calls it lists with the calls written out here by
 // hand. The expectations are this file's own; it runs none of the script's code but the script.
 // Usage: node check-sidebar-calls.js <tool folder under test> <sandbox profile dir> <receiving key>
-// It needs a sandbox whose receiving account has at least 215 chats that are neither archived
-// nor a routine's run, and one archived chat. It puts the sandbox's settings file and plan back
-// as they were when it ends.
+// It needs a sandbox whose receiving account has at least 221 chats that are neither archived,
+// nor a routine's run, nor shown under another chat, six of them linked to no other chat and
+// with no chat under them, and one archived chat linked to none. It puts the sandbox's settings
+// file, plan and the chat entries case 12 stages back as they were when it ends.
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { families } = require('./app-families.js');
 const [tool, profile, key] = process.argv.slice(2);
 if (!key) { console.error('usage: node check-sidebar-calls.js <tool folder> <sandbox profile dir> <receiving key>'); process.exit(2); }
 let fails = 0;
@@ -41,19 +43,31 @@ const data = path.join(profile, '.session-restore');
 const planPath = path.join(data, 'sidebar-plan.json'), callsPath = path.join(data, 'sidebar-calls.json');
 const [account, org] = key.split('/');
 const dir = path.join(store, 'claude-code-sessions', account, org);
-const all = fs.readdirSync(dir).filter(n => /^local_.*\.json$/.test(n)).map(f => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')))
-  .filter(e => typeof e.createdAt === 'number').sort((a, b) => a.createdAt - b.createdAt);
-const usable = all.filter(e => e.isArchived !== true && !e.scheduledTaskId);
-const archived = all.find(e => e.isArchived === true);
-if (usable.length < 215 || !archived) throw new Error(`the sandbox has ${usable.length} usable chats and ${archived ? 1 : 0} archived; it needs 215 and 1`);
-const old = usable.slice(0, 212).map(e => e.sessionId);   // the oldest chats
+const every = fs.readdirSync(dir).filter(n => /^local_.*\.json$/.test(n)).map(f => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+// the families as they are: a chat under another is never named in a call, so none is used below
+// but in case 12, which stages its own
+const nestedNow = families(every.map(x => ({ id: x.sessionId, e: x })));
+const tops = new Set(nestedNow.values());
+const linked = x => ['spawnedFrom', 'forkedFromSessionId', 'lineageDetached'].some(k => Object.prototype.hasOwnProperty.call(x, k));
+const all = every.filter(x => typeof x.createdAt === 'number').sort((p, q) => p.createdAt - q.createdAt);
+const usable = all.filter(x => x.isArchived !== true && !x.scheduledTaskId && !nestedNow.has(x.sessionId));
+const archived = all.find(x => x.isArchived === true && !linked(x) && !tops.has(x.sessionId));
 const newest = usable[usable.length - 1];                    // made after every plan below
-const madeAtMs = newest.createdAt - 1000;
+const madeAtMs = newest ? newest.createdAt - 1000 : 0;
+const old = usable.slice(0, 212).map(x => x.sessionId);     // the oldest chats
+const free = usable.slice(212).filter(x => x !== newest && x.createdAt <= madeAtMs && !linked(x) && !tops.has(x.sessionId)).map(x => x.sessionId);
+if (usable.length < 215 || free.length < 6 || !archived) throw new Error(`the sandbox has ${usable.length} usable chats, ${free.length} more linked to none, and ${archived ? 1 : 0} archived linked to none; it needs 215, 6 and 1`);
 const A = archived.sessionId, N = newest.sessionId;
 const [a, b, c, d, e, f, g] = old;
+const entryFile = id => path.join(dir, id + '.json');
 
 const prefsBefore = fs.readFileSync(prefsPath);
 const planBefore = fs.existsSync(planPath) ? fs.readFileSync(planPath) : null;
+// case 12's chats: P at the top; C a side session under P and GC under C; D taken out from under
+// P; Y a side session under the archived A, which is under P, so the app puts Y under P; Z under A
+// but not a side session, so the app puts it nowhere
+const [P, C, GC, D, Y, Z] = free;
+const staged = new Map([P, C, GC, D, Y, Z, A].map(id => [id, fs.readFileSync(entryFile(id))]));
 const basePrefs = JSON.parse(prefsBefore.toString('utf8'));
 const otherPins = (basePrefs.preferences.epitaxyPrefs['starred-local-code-sessions'] || []).filter(id => !all.some(x => x.sessionId === id));
 
@@ -168,7 +182,34 @@ try {
   fs.unlinkSync(planPath);
   r = run();
   check(r.calls === null && /No sidebar plan is saved/.test(r.out), '    no plan: nothing listed');
+
+  // 12. chats shown under another go wherever the chat at the top of their family goes, so no call
+  //     names them; a chat taken out from under its parent, or under an archived chat it does not
+  //     attach through, is filed like any other
+  const link = (id, parent, side, extra = {}) => {
+    const x = JSON.parse(staged.get(id).toString('utf8'));
+    x.spawnedFrom = { sessionId: parent, taskId: 'task_case12', title: 'case 12', ...(side ? { sideSession: true } : {}) };
+    Object.assign(x, extra);
+    fs.writeFileSync(entryFile(id), JSON.stringify(x));
+  };
+  link(C, P, true); link(GC, C, false); link(D, P, true, { lineageDetached: true }); link(A, P, true); link(Y, A, true); link(Z, A, false);
+  setNow([], []);
+  setPlan({ groups: [G('one', [P, C, GC, D, Y, Z])], pinned: [] });
+  r = run();
+  expectCalls('12. chats under another: only the chats at the top, a detached chat and one under an archived chat it does not attach through are filed', [create('one'), move('one', [P, D, Z])], r);
+  check(/^3 chat\(s\) are shown under the chat they were started from/m.test(r.out), '    and the listing says 3 go wherever the chat at the top goes');
+  setNow([['one', [P]]], []);
+  setPlan({ groups: [G('one', [P]), G('two', [C])], pinned: [] });
+  r = run();
+  expectCalls('    a chat under another planned in a group of its own: no call, and no group made for it', [], r);
+  setNow([['one', [a]], ['old', [C]]], []);
+  setPlan({ groups: [G('one', [a])], pinned: [] });
+  expectCalls('    a chat under another left in a group the plan lacks: not moved alone, and the group is deleted', [del('old')], run());
+  setNow([], [C]);
+  setPlan({ groups: null, pinned: [] });
+  expectCalls('    a chat under another is unpinned like any other', [pin(C, false)], run());
 } finally {
+  for (const [id, bytes] of staged) fs.writeFileSync(entryFile(id), bytes);
   fs.writeFileSync(prefsPath, prefsBefore);
   if (planBefore) fs.writeFileSync(planPath, planBefore); else if (fs.existsSync(planPath)) fs.unlinkSync(planPath);
   if (fs.existsSync(callsPath)) fs.unlinkSync(callsPath);
